@@ -138,10 +138,6 @@ class TechRefreshApp:
         self.notebook = ttk.Notebook(root)
         self.notebook.pack(expand=True, fill="both", padx=24, pady=(0, 16))
 
-        self.tab_plan = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_plan, text="   📊  План (Стандарт)   ")
-        self.create_plan_tab()
-
         self.tab_adjusted = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_adjusted, text="   🚀  План (Вероятностный)   ")
         self.create_adjusted_tab()
@@ -255,57 +251,6 @@ class TechRefreshApp:
         return cv
 
     # === МЕТОДЫ ИНТЕРФЕЙСА ===
-    def create_plan_tab(self):
-        c = self.colors
-        wrap = tk.Frame(self.tab_plan, bg=c['bg_main'])
-        wrap.pack(fill='both', expand=True, padx=14, pady=14)
-
-        # Панель поиска + итоги (карточка)
-        top_outer, top_card = self._soft_card(wrap)
-        top_outer.pack(fill='x', pady=(0, 12))
-        top = tk.Frame(top_card, bg=c['card'])
-        top.pack(fill='x', padx=16, pady=12)
-
-        tk.Label(top, text="🔍  Поиск по ПФ", font=('Segoe UI', 10, 'bold'),
-                 bg=c['card'], fg=c['text_primary']).pack(side='left', padx=(0, 10))
-        self.entry_search_plan = tk.Entry(top, width=32, font=('Segoe UI', 10), bd=0, relief='flat',
-                                          highlightthickness=1, highlightbackground=c['border'],
-                                          highlightcolor=c['accent'], bg='#ffffff',
-                                          fg=c['text_primary'], insertbackground=c['accent'])
-        self.entry_search_plan.pack(side='left', ipady=5, padx=(0, 8))
-        self.entry_search_plan.bind('<KeyRelease>', self.search_plan)
-
-        self.lbl_total_plan = tk.Label(top, text="ИТОГО: ЗНО: 0 | Часов: 0.0 | Избыток: 0",
-                                       font=('Segoe UI', 12, 'bold'), bg=c['card'], fg=c['accent'])
-        self.lbl_total_plan.pack(side='right', padx=(10, 4))
-
-        # Таблица (карточка)
-        tbl_outer, tbl_card = self._soft_card(wrap)
-        tbl_outer.pack(fill='both', expand=True)
-        tbl = tk.Frame(tbl_card, bg=c['card'])
-        tbl.pack(fill='both', expand=True, padx=4, pady=4)
-
-        cols = ("pf", "count", "hours", "excess", "comp_all", "comp_plan")
-        self.tree_plan = ttk.Treeview(tbl, columns=cols, show="headings", height=25)
-        self.tree_plan.heading("pf", text="ПФ")
-        self.tree_plan.heading("count", text="Всего ЗНО")
-        self.tree_plan.heading("hours", text="Часов")
-        self.tree_plan.heading("excess", text="⚠ Избыток")
-        self.tree_plan.heading("comp_all", text="Состав (Все)")
-        self.tree_plan.heading("comp_plan", text="Состав (План)")
-        self.tree_plan.column("pf", width=120, anchor='center')
-        self.tree_plan.column("count", width=90, anchor='center')
-        self.tree_plan.column("hours", width=80, anchor='center')
-        self.tree_plan.column("excess", width=90, anchor='center')
-        self.tree_plan.column("comp_all", width=300)
-        self.tree_plan.column("comp_plan", width=300)
-        self.tree_plan.tag_configure('oddrow', background=c['card'])
-        self.tree_plan.tag_configure('evenrow', background=c['row_alt'])
-        scroll = ttk.Scrollbar(tbl, orient="vertical", command=self.tree_plan.yview)
-        self.tree_plan.configure(yscrollcommand=scroll.set)
-        self.tree_plan.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
-
     def create_adjusted_tab(self):
         c = self.colors
         wrap = tk.Frame(self.tab_adjusted, bg=c['bg_main'])
@@ -400,17 +345,6 @@ class TechRefreshApp:
         self.tree_fail.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
 
-    def search_plan(self, event=None):
-        query = self.entry_search_plan.get().lower().strip()
-        for item in self.tree_plan.get_children():
-            self.tree_plan.delete(item)
-        r = 0
-        for s in self.plan_data_store:
-            if query in str(s['pf']).lower():
-                tag = 'oddrow' if r % 2 == 0 else 'evenrow'
-                self.tree_plan.insert("", "end", values=(s['pf'], s['count'], s['hours'], s['excess'], s['comp_all'], s['comp_plan']), tags=(tag,))
-                r += 1
-
     def search_adjusted(self, event=None):
         query = self.entry_search_adj.get().lower().strip()
         for item in self.tree_adj.get_children():
@@ -480,173 +414,6 @@ class TechRefreshApp:
         return prev.astype('datetime64[D]').astype(object)
 
     # === ЛОГИКА ===
-    def calculate_composition_uniform(self, pool, limit_hours, limit_zno=None, monitor_pct=None, pf_name='', add_log_func=None):
-        current_hours = 0
-        current_count = 0
-        selected_indices = []
-
-        # Ускорение: точечный доступ к Hours/Тип через dict вместо медленного pool.loc[idx, col]
-        hours_map = pool['Hours'].to_dict()
-        type_map = pool['Тип'].to_dict()
-
-        if not limit_zno:
-            groups = pool.groupby(['Тип', 'Маркер активности'])
-            queues_data = []
-            for (t_type, marker), group_df in groups:
-                # Сортируем по приоритету активности (сначала техника с наименьшим приоритетом), затем по Is_Replacement, затем по возрасту
-                sorted_group = group_df.sort_values(by=['Activity_Priority', 'Is_Replacement', 'Возраст, лет'], ascending=[True, False, False])
-                q = deque(sorted_group.index.tolist())
-                if q:
-                    is_priority_group = sorted_group.iloc[0]['Is_Replacement']
-                    queues_data.append({'queue': q, 'priority': is_priority_group, 'type': t_type, 'marker': marker})
-            queues_data.sort(key=lambda x: not x['priority'])
-
-            iteration_safety = 0
-            while queues_data and iteration_safety < 5000:
-                made_progress = False
-                for item in queues_data[:]:
-                    q = item['queue']
-                    if not q:
-                        queues_data.remove(item)
-                        continue
-
-                    cand_idx = q[0]
-                    cand_hours = hours_map[cand_idx]
-                    cand_type = type_map[cand_idx]
-
-                    if cand_hours == 0:
-                        if add_log_func:
-                            add_log_func(cand_idx, f"Пропущен: нулевые часы (ПФ: {pf_name})")
-                        q.popleft()
-                        if not q: queues_data.remove(item)
-                        continue
-
-                    if current_hours + cand_hours <= limit_hours + 0.5:
-                        selected_indices.append(cand_idx)
-                        current_hours += cand_hours
-                        q.popleft()
-                        made_progress = True
-                        if not q: queues_data.remove(item)
-                    else:
-                        if add_log_func:
-                            add_log_func(cand_idx, f"Пропущен: превышен лимит часов (ПФ: {pf_name}, Тип: {cand_type})")
-
-                if not made_progress: break
-                iteration_safety += 1
-        else:
-            groups = pool.groupby(['Тип', 'Маркер активности'])
-            all_queues = []
-            for (t_type, marker), group_df in groups:
-                # Сортируем по приоритету активности (сначала техника с наименьшим приоритетом), затем по Is_Replacement, затем по возрасту
-                sorted_group = group_df.sort_values(by=['Activity_Priority', 'Is_Replacement', 'Возраст, лет'], ascending=[True, False, False])
-                q = deque(sorted_group.index.tolist())
-                if q:
-                    is_priority_group = sorted_group.iloc[0]['Is_Replacement']
-                    is_monitor = 'тр: монитор' in t_type.lower() or 'тр: монитор всп' in t_type.lower()
-                    all_queues.append({
-                        'queue': q,
-                        'priority': is_priority_group,
-                        'type': t_type,
-                        'marker': marker,
-                        'is_monitor': is_monitor
-                    })
-
-            all_queues.sort(key=lambda x: not x['priority'])
-
-            monitor_queues = [x for x in all_queues if x['is_monitor']]
-            other_queues = [x for x in all_queues if not x['is_monitor']]
-
-            monitor_count_selected = 0
-            other_count_selected = 0
-
-            if monitor_pct and monitor_pct > 0:
-                max_monitors = int(limit_zno * monitor_pct / 100)
-                max_others = limit_zno - max_monitors
-            else:
-                max_monitors = 0
-                max_others = limit_zno
-                other_queues.extend(monitor_queues)
-                monitor_queues = []
-
-            iteration_safety = 0
-            while monitor_queues and monitor_count_selected < max_monitors and iteration_safety < 5000:
-                made_progress = False
-                for item in monitor_queues[:]:
-                    q = item['queue']
-                    if not q:
-                        monitor_queues.remove(item)
-                        continue
-
-                    cand_idx = q[0]
-                    cand_hours = hours_map[cand_idx]
-                    cand_type = type_map[cand_idx]
-
-                    if cand_hours == 0:
-                        if add_log_func:
-                            add_log_func(cand_idx, f"Пропущен (Монитор): нулевые часы (ПФ: {pf_name})")
-                        q.popleft()
-                        if not q: monitor_queues.remove(item)
-                        continue
-
-                    if current_hours + cand_hours <= limit_hours + 0.5:
-                        selected_indices.append(cand_idx)
-                        current_hours += cand_hours
-                        monitor_count_selected += 1
-                        current_count += 1
-                        q.popleft()
-                        made_progress = True
-                        if not q: monitor_queues.remove(item)
-                        if monitor_count_selected >= max_monitors: break
-                    else:
-                        if add_log_func:
-                            add_log_func(cand_idx, f"Пропущен (Монитор): превышен лимит часов (ПФ: {pf_name}, Тип: {cand_type})")
-
-                if not made_progress: break
-                iteration_safety += 1
-
-            iteration_safety = 0
-            while other_queues and other_count_selected < max_others and iteration_safety < 5000:
-                made_progress = False
-                for item in other_queues[:]:
-                    q = item['queue']
-                    if not q:
-                        other_queues.remove(item)
-                        continue
-
-                    cand_idx = q[0]
-                    cand_hours = hours_map[cand_idx]
-                    cand_type = type_map[cand_idx]
-
-                    if cand_hours == 0:
-                        if add_log_func:
-                            add_log_func(cand_idx, f"Пропущен (Другое): нулевые часы (ПФ: {pf_name})")
-                        q.popleft()
-                        if not q: other_queues.remove(item)
-                        continue
-
-                    if current_hours + cand_hours <= limit_hours + 0.5:
-                        selected_indices.append(cand_idx)
-                        current_hours += cand_hours
-                        other_count_selected += 1
-                        current_count += 1
-                        q.popleft()
-                        made_progress = True
-                        if not q: other_queues.remove(item)
-                    else:
-                        if add_log_func:
-                            add_log_func(cand_idx, f"Пропущен (Другое): превышен лимит часов (ПФ: {pf_name}, Тип: {cand_type})")
-
-                if not made_progress: break
-                iteration_safety += 1
-
-        if selected_indices:
-            result_slice = pool.loc[selected_indices]
-            comp_series = result_slice['Тип'].value_counts()
-            comp_str = ", ".join([f"{t}: {c}" for t, c in comp_series.items()])
-        else: comp_str = "-"
-
-        return selected_indices, round(current_hours, 2), comp_str
-
     # ============================================
 
     def run_logic(self, folder_path):
@@ -1129,9 +896,6 @@ class TechRefreshApp:
 
         valid_pool = df_dk.loc[selected_indices].copy()
 
-        final_indices = []
-        stats_table = []
-        plan_distribution = {}
 
         final_adjusted_indices = []
         adjusted_stats_table = []
@@ -1191,41 +955,6 @@ class TechRefreshApp:
             pf_pool = valid_pool[valid_pool['Адрес ПФ'] == pf].copy()
             if pf_pool.empty: continue
 
-            # Стандартный план
-            idx_all, hours_all, str_all = self.calculate_composition_uniform(
-                pf_pool, limit, limit_zno=limit_zno, monitor_pct=monitor_pct, pf_name=pf, add_log_func=add_log
-            )
-
-            for i in idx_all: add_log(i, f">>> ВЫБРАН (ПФ: {pf}, Группа: {str_all})")
-            final_indices.extend(idx_all)
-
-            stats_table.append({
-                'pf': pf, 'count': len(idx_all), 'hours': hours_all,
-                'excess': excess_by_pf.get(pf, 0), 'comp_all': str_all, 'comp_plan': str_all
-            })
-
-            # Логирование записей, которые были в пуле, но не попали в план
-            if len(pf_pool) > len(idx_all):
-                not_selected = pf_pool[~pf_pool.index.isin(idx_all)]
-                for idx, row in not_selected.iterrows():
-                    group_result = str(row.get('Результат Техрефреш: группировка', '')).strip()
-                    is_transferred_zno = '2.7' in group_result and 'Перевыставить' in group_result
-                    if is_transferred_zno:
-                        add_log(idx, f"НЕ ВЫБРАН В ПЛАН (ПФ: {pf}, есть в пуле, но лимит часов/ЗНО) (Группировка: {group_result})")
-                    else:
-                        add_log(idx, f"НЕ ВЫБРАН В ПЛАН (ПФ: {pf}, есть в пуле, но лимит часов/ЗНО)")
-
-            # Подсчет записей с группировкой 2.7 отдельно
-            transferred_count = 0
-            if idx_all:
-                res_slice = df_dk.loc[idx_all]
-                transferred_count = len(res_slice[res_slice['Результат Техрефреш: группировка'].astype(str).str.contains(r'2\.7.*Перевыставить', na=False)])
-            if transferred_count > 0:
-                stats_table[-1]['comp_all'] = f"{str_all} | 2.7: {transferred_count}" if str_all else f"2.7: {transferred_count}"
-
-            res_slice = df_dk.loc[idx_all]
-            for t in res_slice['Тип']: plan_distribution[t] = plan_distribution.get(t, 0) + 1
-
             # Вероятностный план
             idx_adj, std_h_adj, eff_h_adj, str_adj, avg_fail_rate = self.calculate_adjusted_composition_uniform(
                 pf_pool, limit, pf_type_fail_rates, pf, limit_zno=limit_zno, monitor_pct=monitor_pct, add_log_func=add_log
@@ -1243,14 +972,9 @@ class TechRefreshApp:
                 'comp': str_adj
             })
 
-        # Переносим финальные Log/Status обратно в df_dk для листов "Ошибки и Пропуски" и "Debug Log".
+        # Переносим финальные Log/Status обратно в df_dk для листа "Debug Log".
         df_dk['Log'] = log_list
         df_dk['Status'] = status_list
-
-        total_zno_std = sum(d['count'] for d in stats_table)
-        total_hours_std = sum(d['hours'] for d in stats_table)
-        total_excess = sum(d['excess'] for d in stats_table)
-        self.lbl_total_plan.config(text=f"ИТОГО: ЗНО: {total_zno_std} | Часов: {total_hours_std} | Избыток: {total_excess}")
 
         total_zno_adj = sum(d['count'] for d in adjusted_stats_table)
         total_hours_std_adj = sum(d['hours_std'] for d in adjusted_stats_table)
@@ -1258,15 +982,12 @@ class TechRefreshApp:
         self.lbl_total_adj.config(text=f"ИТОГО: ЗНО: {total_zno_adj} | Станд.Часов: {total_hours_std_adj} | Эфф.Часов: {total_hours_eff_adj}")
 
         self.found_replacements_data_store = []
-        self.plan_data_store = stats_table
         self.fail_data_store = sorted(failure_stats, key=lambda x: x['rate'], reverse=True)
         self.adjusted_plan_data_store = adjusted_stats_table
 
-        self.entry_search_plan.delete(0, tk.END)
         self.entry_search_fail.delete(0, tk.END)
         self.entry_search_adj.delete(0, tk.END)
 
-        self.search_plan()
         self.search_failures()
         self.search_adjusted()
 
@@ -1282,21 +1003,6 @@ class TechRefreshApp:
             return df
 
         writer = pd.ExcelWriter(output_path, engine='openpyxl')
-
-        if final_indices:
-            result_df = df_dk.loc[final_indices].copy()
-            result_df['Причина'] = result_df.apply(
-                lambda x: 'Замена отказника' if x['Is_Replacement'] else (
-                    'Плановый рефреш (Перевыставка)' if '2.7' in str(x.get('Результат Техрефреш: группировка', '')).strip() and 'Перевыставить' in str(x.get('Результат Техрефреш: группировка', '')).strip() else 'Плановый рефреш'
-                ), axis=1
-            )
-            result_df = clean_dates(result_df)
-            result_df = self.add_semicolon_to_serial(result_df)
-            result_df.to_excel(writer, sheet_name='План ЗНО (Стандарт)', index=False)
-        else:
-            pd.DataFrame().to_excel(writer, sheet_name='План ЗНО (Стандарт)', index=False)
-
-        pd.DataFrame(stats_table).to_excel(writer, sheet_name='Сводный план (Стандарт)', index=False)
 
         if final_adjusted_indices:
             result_adj_df = df_dk.loc[final_adjusted_indices].copy()
@@ -1333,22 +1039,6 @@ class TechRefreshApp:
             replacements_df.to_excel(writer, sheet_name='Найденные Замены', index=False)
         else:
             pd.DataFrame().to_excel(writer, sheet_name='Найденные Замены', index=False)
-
-        skipped_df = df_dk[
-            (df_dk['Status'] == "Ошибка") |
-            (df_dk['Log'].str.contains("ИЗБЫТОК")) |
-            (df_dk['Log'].str.contains("ВК отсутствует")) |
-            (df_dk['Is_Excluded']) |
-            (df_dk['Log'].str.contains("ПФ не пополнен")) |
-            ((df_dk['Log'].str.contains("Есть ЗНО на Техрефреш")) & (~df_dk['Результат Техрефреш: группировка'].astype(str).str.contains(r'2\.7.*Перевыставить', na=False)))
-            ].copy()
-
-        if not skipped_df.empty:
-            skipped_df = clean_dates(skipped_df)
-            skipped_df = self.add_semicolon_to_serial(skipped_df)
-            skipped_df.to_excel(writer, sheet_name='Ошибки и Пропуски', index=False)
-        else:
-            pd.DataFrame().to_excel(writer, sheet_name='Ошибки и Пропуски', index=False)
 
         df_debug = clean_dates(df_dk.copy())
         
