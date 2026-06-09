@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 import os
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -367,6 +368,29 @@ class TechRefreshApp:
             return float(s)
         except: return 0.0
 
+    def get_previous_working_day(self, ref_date, holidays_list=None):
+        """Возвращает последний рабочий день строго РАНЬШЕ ref_date.
+
+        Учитывает выходные (сб, вс) и переданный список праздников holidays_list
+        (список объектов datetime.date). Использует только numpy (входит в Anaconda).
+
+        Примеры:
+        - ref_date = понедельник, праздников нет -> пятница;
+        - ref_date = понедельник, пятница праздник -> четверг;
+        - ref_date = понедельник, чт+пт праздники -> среда.
+        """
+        # numpy busday: weekmask по умолчанию Пн-Пт ('1111100')
+        holidays_arr = np.array(
+            [np.datetime64(h, 'D') for h in (holidays_list or [])],
+            dtype='datetime64[D]'
+        )
+        ref = np.datetime64(ref_date, 'D')
+        # roll='forward': если сам ref_date — выходной/праздник, сдвигаемся вперёд к
+        # ближайшему рабочему дню, и только потом отступаем на один рабочий день назад.
+        # Так для любого ref_date получаем последний рабочий день строго раньше него.
+        prev = np.busday_offset(ref, -1, roll='forward', holidays=holidays_arr)
+        return prev.astype('datetime64[D]').astype(object)
+
     # === ЛОГИКА ===
     def calculate_composition_uniform(self, pool, limit_hours, limit_zno=None, monitor_pct=None, pf_name='', add_log_func=None):
         current_hours = 0
@@ -589,6 +613,31 @@ class TechRefreshApp:
                     self.log(f"Предупреждение: Не удалось загрузить лист 'Приоритет' из справочника: {e}")
             else:
                 self.log("Предупреждение: В справочнике не найден лист 'Приоритет'")
+
+            # Лист с праздниками / нерабочими днями (опционально).
+            # Российские праздники нельзя вычислить алгоритмически (переносы задаются
+            # указами), поэтому список ведётся вручную на отдельном листе справочника.
+            holidays_list = []
+            holiday_sheet = None
+            for candidate in ['Праздники', 'праздники', 'Выходные', 'Нерабочие дни', 'Праздничные дни']:
+                if candidate in sheet_names:
+                    # Берём оригинальное (необрезанное) имя листа
+                    holiday_sheet = xls.sheet_names[sheet_names.index(candidate)]
+                    break
+            if holiday_sheet is not None:
+                try:
+                    df_holidays = pd.read_excel(ref_path, sheet_name=holiday_sheet)
+                    # Собираем даты из всех ячеек листа (поддерживаем любой формат столбцов)
+                    for col in df_holidays.columns:
+                        parsed = pd.to_datetime(df_holidays[col], errors='coerce', dayfirst=True)
+                        for d in parsed.dropna():
+                            holidays_list.append(d.date())
+                    holidays_list = sorted(set(holidays_list))
+                    self.log(f"Загружено праздничных/нерабочих дней: {len(holidays_list)}")
+                except Exception as e:
+                    self.log(f"Предупреждение: не удалось загрузить лист праздников '{holiday_sheet}': {e}")
+            else:
+                self.log("Лист с праздниками не найден — учитываются только выходные (сб, вс)")
         except Exception as e:
             messagebox.showerror("Ошибка", f"Справочник: {e}")
             return
@@ -739,7 +788,9 @@ class TechRefreshApp:
         # 4. ВК не отсутствует
         # 5. Дата исполнения ЗНО на пополнение ПФ не более 2 месяцев от текущей даты
         #    (если ЗНО на пополнение ПФ есть и дата старше 2 месяцев - исключаем)
-        # 6. Для отказников: дата исполнения ЗНО на Техрефреш должна быть старше 2 дней
+        # 6. Для отказников: дата исполнения ЗНО на Техрефреш должна быть строго
+        #    раньше предыдущего рабочего дня (с учётом выходных и праздников).
+        #    Если ЗНО закрылось в предыдущий рабочий день (или позже) — замену не ищем.
 
         # Проверка даты исполнения ЗНО на пополнение ПФ (не более 2 месяцев)
         date_col_replenishment = 'ЗНО на пополнение ПФ: дата исполнения'
@@ -781,15 +832,18 @@ class TechRefreshApp:
             (~df_dk['Is_Excluded'])
             ]
 
-        # Проверка даты исполнения ЗНО на Техрефреш для отказников (должна быть старше 2 дней)
+        # Проверка даты исполнения ЗНО на Техрефреш для отказников:
+        # замена ищется, только если дата исполнения строго РАНЬШЕ предыдущего
+        # рабочего дня (предыдущий рабочий день и позже считаем "слишком свежим").
         date_col_zno_execution = 'ЗНО на Техрефреш: дата исполнения'
-        two_days_ago = None
+        prev_working_day = None
         if date_col_zno_execution in df_dk.columns:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 df_dk[date_col_zno_execution] = pd.to_datetime(df_dk[date_col_zno_execution], errors='coerce').dt.tz_localize(None)
-            two_days_ago = target_date - timedelta(days=2)
-            self.log(f"Проверка даты исполнения ЗНО на Техрефреш: замена ищется только если дата исполнения < {two_days_ago.strftime('%d.%m.%Y')}")
+            prev_working_day = self.get_previous_working_day(target_date, holidays_list)
+            self.log(f"Предыдущий рабочий день от {target_date.strftime('%d.%m.%Y')}: {prev_working_day.strftime('%d.%m.%Y')}. "
+                     f"Замена ищется только если дата исполнения ЗНО < {prev_working_day.strftime('%d.%m.%Y')}")
 
         # Словарь для хранения дат ЗНО на пополнение ПФ по номеру ЗНО
         zno_replenishment_dates = {}
@@ -814,15 +868,16 @@ class TechRefreshApp:
             if not is_pf_replenished:
                 continue
 
-            # Проверка даты исполнения ЗНО на Техрефреш для отказников
-            # Замена не ищется, если дата исполнения вчера или сегодня (меньше 2 дней назад)
-            if two_days_ago is not None:
+            # Проверка даты исполнения ЗНО на Техрефреш для отказников.
+            # Замена не ищется, если ЗНО закрылось в предыдущий рабочий день или позже.
+            if prev_working_day is not None:
                 zno_exec_date = df_dk.loc[idx, date_col_zno_execution]
                 if pd.notna(zno_exec_date):
                     exec_date = pd.to_datetime(zno_exec_date).replace(tzinfo=None).date()
-                    # Если дата исполнения >= 2 дней назад (т.е. вчера, сегодня или позже), пропускаем
-                    if exec_date >= two_days_ago:
-                        add_log(idx, f"ЗНО на Техрефреш слишком свежий ({exec_date.strftime('%d.%m.%Y')}), замена не требуется")
+                    # exec_date >= предыдущего рабочего дня → слишком свежий, пропускаем
+                    if exec_date >= prev_working_day:
+                        add_log(idx, f"ЗНО на Техрефреш слишком свежий ({exec_date.strftime('%d.%m.%Y')}), "
+                                     f"не раньше предыдущего рабочего дня ({prev_working_day.strftime('%d.%m.%Y')}), замена не требуется")
                         excess_by_pf[pf] = excess_by_pf.get(pf, 0) + 1
                         continue
 
