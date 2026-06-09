@@ -1,0 +1,2317 @@
+import pandas as pd
+import os
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+from datetime import datetime, timedelta
+import warnings
+import traceback
+import re
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import matplotlib
+from collections import deque, defaultdict
+
+matplotlib.use('TkAgg')
+
+try:
+    import openpyxl
+    from openpyxl import load_workbook
+except ImportError:
+    pass  # openpyxl необязательный модуль
+
+try:
+    import plotly
+    import plotly.express as px
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    HAS_PLOTLY = True
+except ImportError:
+    HAS_PLOTLY = False
+
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
+# --- КОНСТАНТЫ И СПРАВОЧНИКИ ---
+TYPE_MAPPING = {
+    'тр: арм': 'ИТ.Системный блок',
+    'тр: арм всп': 'ИТ.Системный блок',
+    'тр: арм всп замена на бу': 'ИТ.Системный блок',
+    'тр: тк': 'ИТ.Тонкий клиент',
+    'тр: macbook pro': 'Макбук',
+    'тр: ноутбук офисный': 'Ноутбук офисный',
+    'тр: ноутбук офисный pro': 'Ноутбук офисный ПРО',
+    'тр: ноутбук производительный': 'Ноутбук производительный',
+    'тр: монитор': 'ИТ.Монитор',
+    'тр: монитор всп': 'ИТ.Монитор',
+    'тр: планшет': 'ИТ.Компьютер планшет',
+    'тр: от мфу а4': 'ИТ.Системный блок',
+    'тр: от мфу  а4': 'ИТ.Системный блок'
+}
+
+FAILED_TIME_HOURS = 0.084
+
+class TechRefreshApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Автоматизация Техрефреша Pro v9.15 (Priority Support)")
+        self.root.geometry("1400x950")
+
+        # Цветовая схема
+        self.colors = {
+            'bg_main': '#f8f9fa',
+            'header': '#4a90e2',
+            'header_text': '#ffffff',
+            'panel': '#ffffff',
+            'accent': '#27ae60',
+            'accent_hover': '#219a52',
+            'warning': '#f39c12',
+            'danger': '#e74c3c',
+            'info': '#3498db',
+            'text_primary': '#2c3e50',
+            'text_secondary': '#7f8c8d',
+            'border': '#e9ecef',
+            'row_alt': '#f1f3f5'
+        }
+
+        self.root.configure(bg=self.colors['bg_main'])
+
+        # Стили ttk
+        self.style = ttk.Style()
+        self.style.theme_use('clam')
+        
+        # Настройка стилей для более современного вида
+        self.style.configure("TNotebook", background=self.colors['bg_main'], tabmargins=[10, 5])
+        self.style.configure("TNotebook.Tab", 
+                            background=self.colors['panel'],
+                            foreground=self.colors['text_primary'],
+                            padding=[15, 10],
+                            font=('Segoe UI', 11, 'bold'))
+        self.style.map("TNotebook.Tab",
+                      background=[('selected', self.colors['accent'])],
+                      foreground=[('selected', self.colors['header_text'])])
+        
+        self.style.configure("Treeview", 
+                            font=('Segoe UI', 10),
+                            rowheight=30,
+                            background=self.colors['panel'],
+                            fieldbackground=self.colors['panel'])
+        self.style.map('Treeview', 
+                      background=[('selected', self.colors['accent'])],
+                      foreground=[('selected', self.colors['header_text'])])
+        
+        self.style.configure("Treeview.Heading", 
+                            font=('Segoe UI', 11, 'bold'),
+                            background=self.colors['accent'],
+                            foreground=self.colors['header_text'],
+                            padding=[5, 10])
+        
+        self.style.configure("TLabel", background=self.colors['bg_main'], foreground=self.colors['text_primary'])
+        self.style.configure("TFrame", background=self.colors['bg_main'])
+
+        self.df_result = None
+        self.plan_data_store = []
+        self.fail_data_store = []
+        self.adjusted_plan_data_store = []
+
+        # Header - современный дизайн
+        header = tk.Frame(root, bg=self.colors['header'], height=80, bd=0, relief='flat')
+        header.pack(fill="x", side="top", pady=(0, 10))
+        
+        title_frame = tk.Frame(header, bg=self.colors['header'])
+        title_frame.pack(pady=20)
+        
+        # Иконка заголовка
+        lbl_icon = tk.Label(title_frame, text="⚙️", font=('Segoe UI', 24), bg=self.colors['header'], fg=self.colors['header_text'])
+        lbl_icon.pack(side='left', padx=(20, 10))
+        
+        lbl_title = tk.Label(title_frame, text="Умный планировщик Техрефреша", 
+                            font=('Segoe UI', 20, 'bold'), 
+                            bg=self.colors['header'], 
+                            fg=self.colors['header_text'])
+        lbl_title.pack(side='left')
+
+        # === БЛОК ВЫБОРА ДАТЫ ===
+        date_frame = tk.Frame(root, bg=self.colors['panel'], bd=1, relief='flat')
+        date_frame.pack(pady=10, padx=20, fill="x")
+        
+        date_inner = tk.Frame(date_frame, bg=self.colors['panel'])
+        date_inner.pack(pady=15, padx=20)
+
+        lbl_date = tk.Label(date_inner, text="📅 Дата для расчета плана:", 
+                           font=('Segoe UI', 11, 'bold'), 
+                           bg=self.colors['panel'], 
+                           fg=self.colors['text_primary'])
+        lbl_date.pack(side="left", padx=(0, 20))
+
+        self.date_choice = tk.StringVar(value="today")
+
+        rb_today = ttk.Radiobutton(date_inner, text="Сегодня", variable=self.date_choice, value="today")
+        rb_today.pack(side="left", padx=10)
+
+        rb_tomorrow = ttk.Radiobutton(date_inner, text="Завтра", variable=self.date_choice, value="tomorrow")
+        rb_tomorrow.pack(side="left", padx=10)
+
+        today_str = datetime.now().strftime("%d.%m.%Y")
+        tomorrow_str = (datetime.now() + timedelta(days=1)).strftime("%d.%m.%Y")
+        lbl_hint = tk.Label(date_inner, text=f"(Сегодня: {today_str} | Завтра: {tomorrow_str})",
+                            font=('Segoe UI', 10), 
+                            bg=self.colors['panel'], 
+                            fg=self.colors['text_secondary'])
+        lbl_hint.pack(side="left", padx=(20, 0))
+
+        # Кнопка запуска с современным дизайном
+        self.btn_select = tk.Button(root, 
+                                   text="📁 ВЫБРАТЬ ПАПКУ И ЗАПУСТИТЬ РАСЧЕТ", 
+                                   command=self.process_files,
+                                   font=("Segoe UI", 12, "bold"), 
+                                   bg=self.colors['accent'], 
+                                   fg="white", 
+                                   bd=0, 
+                                   cursor="hand2",
+                                   activebackground=self.colors['accent_hover'],
+                                   activeforeground="white",
+                                   relief='flat',
+                                   padx=30, 
+                                   pady=12)
+        self.btn_select.pack(pady=15, ipadx=30, ipady=12)
+
+        # Прогресс бар
+        self.progress = ttk.Progressbar(root, orient="horizontal", length=500, mode="determinate")
+        self.progress.pack(pady=10, padx=20)
+
+        # Tabs с современным дизайном
+        self.notebook = ttk.Notebook(root)
+        self.notebook.pack(expand=True, fill="both", padx=20, pady=10)
+
+        self.tab_plan = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_plan, text="📊 План (Стандарт)")
+        self.create_plan_tab()
+
+        self.tab_adjusted = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_adjusted, text="🚀 План (Вероятностный)")
+        self.create_adjusted_tab()
+
+        self.tab_failures = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_failures, text="📉 Аналитика отказов")
+        self.create_failures_tab()
+
+    # === МЕТОДЫ ИНТЕРФЕЙСА ===
+    def create_plan_tab(self):
+        search_frame = tk.Frame(self.tab_plan, bg=self.colors['panel'], bd=1, relief='flat')
+        search_frame.pack(fill="x", padx=10, pady=10)
+        
+        search_inner = tk.Frame(search_frame, bg=self.colors['panel'])
+        search_inner.pack(pady=10, padx=10)
+        
+        lbl_search = tk.Label(search_inner, text="🔍 Поиск по ПФ:", font=('Segoe UI', 10, 'bold'), bg=self.colors['panel'], fg=self.colors['text_primary'])
+        lbl_search.pack(side="left", padx=(0, 10))
+        
+        self.entry_search_plan = tk.Entry(search_inner, width=35, font=('Segoe UI', 10), bd=1, relief='flat', highlightthickness=1, highlightbackground=self.colors['border'], highlightcolor=self.colors['accent'])
+        self.entry_search_plan.pack(side="left", padx=10)
+        self.entry_search_plan.bind('<KeyRelease>', self.search_plan)
+
+        total_frame = tk.Frame(self.tab_plan, bg=self.colors['panel'], height=40, bd=1, relief='flat')
+        total_frame.pack(fill="x", padx=10, pady=(0, 5))
+        
+        total_inner = tk.Frame(total_frame, bg=self.colors['panel'])
+        total_inner.pack(pady=8, padx=15)
+        
+        self.lbl_total_plan = tk.Label(total_inner, text="ИТОГО: ЗНО: 0 | Часов: 0.0 | Избыток: 0",
+                                       font=('Segoe UI', 12, 'bold'), bg=self.colors['panel'], fg=self.colors['accent'])
+        self.lbl_total_plan.pack(side="left", padx=10, pady=2)
+
+        cols = ("pf", "count", "hours", "excess", "comp_all", "comp_plan")
+        self.tree_plan = ttk.Treeview(self.tab_plan, columns=cols, show="headings", height=25)
+        self.tree_plan.heading("pf", text="ПФ")
+        self.tree_plan.heading("count", text="Всего ЗНО")
+        self.tree_plan.heading("hours", text="Часов")
+        self.tree_plan.heading("excess", text="⚠️ Избыток")
+        self.tree_plan.heading("comp_all", text="Состав (Все)")
+        self.tree_plan.heading("comp_plan", text="Состав (План)")
+        self.tree_plan.column("pf", width=120, anchor='center')
+        self.tree_plan.column("count", width=80, anchor='center')
+        self.tree_plan.column("hours", width=80, anchor='center')
+        self.tree_plan.column("excess", width=80, anchor='center')
+        self.tree_plan.column("comp_all", width=300)
+        self.tree_plan.column("comp_plan", width=300)
+        scroll = ttk.Scrollbar(self.tab_plan, orient="vertical", command=self.tree_plan.yview)
+        self.tree_plan.configure(yscrollcommand=scroll.set)
+        self.tree_plan.pack(side="left", fill="both", expand=True, padx=10, pady=5)
+        scroll.pack(side="right", fill="y")
+
+    def create_adjusted_tab(self):
+        info_frame = tk.Frame(self.tab_adjusted, bg=self.colors['panel'], bd=1, relief='flat')
+        info_frame.pack(fill="x", padx=10, pady=10)
+        info_inner = tk.Frame(info_frame, bg=self.colors['panel'])
+        info_inner.pack(pady=10, padx=15)
+        lbl_info = tk.Label(info_inner, text="ℹ️ Кандидаты: ПФ не пополнен, нет ЗНО, нет ЗНО на пополнение, ВК на месте.",
+                            font=('Segoe UI', 10, 'bold'), bg=self.colors['panel'], fg=self.colors['accent'], anchor="w")
+        lbl_info.pack(fill="x", padx=5)
+
+        search_frame = tk.Frame(self.tab_adjusted, bg=self.colors['panel'], bd=1, relief='flat')
+        search_frame.pack(fill="x", padx=10, pady=5)
+        search_inner = tk.Frame(search_frame, bg=self.colors['panel'])
+        search_inner.pack(pady=10, padx=10)
+        
+        lbl_search = tk.Label(search_inner, text="🔍 Поиск по ПФ:", font=('Segoe UI', 10, 'bold'), bg=self.colors['panel'], fg=self.colors['text_primary'])
+        lbl_search.pack(side="left", padx=(0, 10))
+        
+        self.entry_search_adj = tk.Entry(search_inner, width=35, font=('Segoe UI', 10), bd=1, relief='flat', highlightthickness=1, highlightbackground=self.colors['border'], highlightcolor=self.colors['accent'])
+        self.entry_search_adj.pack(side="left", padx=10)
+        self.entry_search_adj.bind('<KeyRelease>', self.search_adjusted)
+
+        total_frame = tk.Frame(self.tab_adjusted, bg=self.colors['panel'], height=40, bd=1, relief='flat')
+        total_frame.pack(fill="x", padx=10, pady=(0, 5))
+        total_inner = tk.Frame(total_frame, bg=self.colors['panel'])
+        total_inner.pack(pady=8, padx=15)
+        
+        self.lbl_total_adj = tk.Label(total_inner, text="ИТОГО: ЗНО: 0 | Станд.Часов: 0.0 | Эфф.Часов: 0.0",
+                                      font=('Segoe UI', 12, 'bold'), bg=self.colors['panel'], fg=self.colors['accent'])
+        self.lbl_total_adj.pack(side="left", padx=10, pady=2)
+
+        cols = ("pf", "count", "hours_std", "hours_eff", "fail_rate_used", "comp")
+        self.tree_adj = ttk.Treeview(self.tab_adjusted, columns=cols, show="headings", height=25)
+        self.tree_adj.heading("pf", text="ПФ")
+        self.tree_adj.heading("count", text="Кол-во ЗНО")
+        self.tree_adj.heading("hours_std", text="Станд. Часы")
+        self.tree_adj.heading("hours_eff", text="Эффект. Часы")
+        self.tree_adj.heading("fail_rate_used", text="Ср. % Отказов")
+        self.tree_adj.heading("comp", text="Состав")
+        self.tree_adj.column("pf", width=120, anchor='center')
+        self.tree_adj.column("count", width=80, anchor='center')
+        self.tree_adj.column("hours_std", width=100, anchor='center')
+        self.tree_adj.column("hours_eff", width=100, anchor='center')
+        self.tree_adj.column("fail_rate_used", width=120, anchor='center')
+        self.tree_adj.column("comp", width=300)
+
+        scroll = ttk.Scrollbar(self.tab_adjusted, orient="vertical", command=self.tree_adj.yview)
+        self.tree_adj.configure(yscrollcommand=scroll.set)
+        self.tree_adj.pack(side="left", fill="both", expand=True, padx=10, pady=5)
+        scroll.pack(side="right", fill="y")
+
+    def create_failures_tab(self):
+        search_frame = tk.Frame(self.tab_failures, bg=self.colors['panel'], bd=1, relief='flat')
+        search_frame.pack(fill="x", padx=10, pady=10)
+        search_inner = tk.Frame(search_frame, bg=self.colors['panel'])
+        search_inner.pack(pady=10, padx=10)
+        
+        lbl_search = tk.Label(search_inner, text="🔍 Поиск по ПФ:", font=('Segoe UI', 10, 'bold'), bg=self.colors['panel'], fg=self.colors['text_primary'])
+        lbl_search.pack(side="left", padx=(0, 10))
+        
+        self.entry_search_fail = tk.Entry(search_inner, width=35, font=('Segoe UI', 10), bd=1, relief='flat', highlightthickness=1, highlightbackground=self.colors['border'], highlightcolor=self.colors['accent'])
+        self.entry_search_fail.pack(side="left", padx=10)
+        self.entry_search_fail.bind('<KeyRelease>', self.search_failures)
+
+        cols = ("pf", "type", "total_zno", "failed_zno", "fail_rate")
+        self.tree_fail = ttk.Treeview(self.tab_failures, columns=cols, show="headings", height=25)
+        self.tree_fail.heading("pf", text="ПФ")
+        self.tree_fail.heading("type", text="Тип оборудования")
+        self.tree_fail.heading("total_zno", text="Всего закрыто ЗНО")
+        self.tree_fail.heading("failed_zno", text="Неудачных ЗНО")
+        self.tree_fail.heading("fail_rate", text="% Отказов")
+        self.tree_fail.column("pf", width=120, anchor='center')
+        self.tree_fail.column("type", width=200)
+        self.tree_fail.column("total_zno", width=150, anchor='center')
+        self.tree_fail.column("failed_zno", width=150, anchor='center')
+        self.tree_fail.column("fail_rate", width=100, anchor='center')
+        
+        scroll = ttk.Scrollbar(self.tab_failures, orient="vertical", command=self.tree_fail.yview)
+        self.tree_fail.configure(yscrollcommand=scroll.set)
+        self.tree_fail.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+        scroll.pack(side="right", fill="y")
+
+    def search_plan(self, event=None):
+        query = self.entry_search_plan.get().lower().strip()
+        for item in self.tree_plan.get_children():
+            self.tree_plan.delete(item)
+        for s in self.plan_data_store:
+            if query in str(s['pf']).lower():
+                self.tree_plan.insert("", "end", values=(s['pf'], s['count'], s['hours'], s['excess'], s['comp_all'], s['comp_plan']))
+
+    def search_adjusted(self, event=None):
+        query = self.entry_search_adj.get().lower().strip()
+        for item in self.tree_adj.get_children():
+            self.tree_adj.delete(item)
+        for s in self.adjusted_plan_data_store:
+            if query in str(s['pf']).lower():
+                self.tree_adj.insert("", "end", values=(s['pf'], s['count'], s['hours_std'], s['hours_eff'], s['fail_rate_used'], s['comp']))
+
+    def search_failures(self, event=None):
+        query = self.entry_search_fail.get().lower().strip()
+        for item in self.tree_fail.get_children():
+            self.tree_fail.delete(item)
+        for f in self.fail_data_store:
+            if query in str(f['pf']).lower() or query in str(f['type']).lower():
+                self.tree_fail.insert("", "end", values=(f['pf'], f['type'], f['total'], f['fails'], f"{f['rate']}%"))
+
+    def log(self, message):
+        print(message)
+
+    def process_files(self):
+        folder_path = filedialog.askdirectory()
+        if not folder_path:
+            return
+        try:
+            self.progress['value'] = 0
+            self.run_logic(folder_path)
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Произошла ошибка:\n{str(e)}")
+            traceback.print_exc()
+
+    def safe_float(self, val):
+        try:
+            s = str(val).strip()
+            s = re.sub(r'[^\d.,]', '', s)
+            s = s.replace(',', '.')
+            if s == '': return 0.0
+            return float(s)
+        except: return 0.0
+
+    # === ЛОГИКА ===
+    def calculate_composition_uniform(self, pool, limit_hours, limit_zno=None, monitor_pct=None, pf_name='', add_log_func=None):
+        current_hours = 0
+        current_count = 0
+        selected_indices = []
+
+        if not limit_zno:
+            groups = pool.groupby(['Тип', 'Маркер активности'])
+            queues_data = []
+            for (t_type, marker), group_df in groups:
+                # Сортируем по приоритету активности (сначала техника с наименьшим приоритетом), затем по Is_Replacement, затем по возрасту
+                sorted_group = group_df.sort_values(by=['Activity_Priority', 'Is_Replacement', 'Возраст, лет'], ascending=[True, False, False])
+                q = deque(sorted_group.index.tolist())
+                if q:
+                    is_priority_group = sorted_group.iloc[0]['Is_Replacement']
+                    queues_data.append({'queue': q, 'priority': is_priority_group, 'type': t_type, 'marker': marker})
+            queues_data.sort(key=lambda x: not x['priority'])
+
+            iteration_safety = 0
+            while queues_data and iteration_safety < 5000:
+                made_progress = False
+                for item in queues_data[:]:
+                    q = item['queue']
+                    if not q:
+                        queues_data.remove(item)
+                        continue
+
+                    cand_idx = q[0]
+                    cand_hours = pool.loc[cand_idx, 'Hours']
+                    cand_type = pool.loc[cand_idx, 'Тип']
+
+                    if cand_hours == 0:
+                        if add_log_func:
+                            add_log_func(cand_idx, f"Пропущен: нулевые часы (ПФ: {pf_name})")
+                        q.popleft()
+                        if not q: queues_data.remove(item)
+                        continue
+
+                    if current_hours + cand_hours <= limit_hours + 0.5:
+                        selected_indices.append(cand_idx)
+                        current_hours += cand_hours
+                        q.popleft()
+                        made_progress = True
+                        if not q: queues_data.remove(item)
+                    else:
+                        if add_log_func:
+                            add_log_func(cand_idx, f"Пропущен: превышен лимит часов (ПФ: {pf_name}, Тип: {cand_type})")
+
+                if not made_progress: break
+                iteration_safety += 1
+        else:
+            groups = pool.groupby(['Тип', 'Маркер активности'])
+            all_queues = []
+            for (t_type, marker), group_df in groups:
+                # Сортируем по приоритету активности (сначала техника с наименьшим приоритетом), затем по Is_Replacement, затем по возрасту
+                sorted_group = group_df.sort_values(by=['Activity_Priority', 'Is_Replacement', 'Возраст, лет'], ascending=[True, False, False])
+                q = deque(sorted_group.index.tolist())
+                if q:
+                    is_priority_group = sorted_group.iloc[0]['Is_Replacement']
+                    is_monitor = 'тр: монитор' in t_type.lower() or 'тр: монитор всп' in t_type.lower()
+                    all_queues.append({
+                        'queue': q,
+                        'priority': is_priority_group,
+                        'type': t_type,
+                        'marker': marker,
+                        'is_monitor': is_monitor
+                    })
+
+            all_queues.sort(key=lambda x: not x['priority'])
+
+            monitor_queues = [x for x in all_queues if x['is_monitor']]
+            other_queues = [x for x in all_queues if not x['is_monitor']]
+
+            monitor_count_selected = 0
+            other_count_selected = 0
+
+            if monitor_pct and monitor_pct > 0:
+                max_monitors = int(limit_zno * monitor_pct / 100)
+                max_others = limit_zno - max_monitors
+            else:
+                max_monitors = 0
+                max_others = limit_zno
+                other_queues.extend(monitor_queues)
+                monitor_queues = []
+
+            iteration_safety = 0
+            while monitor_queues and monitor_count_selected < max_monitors and iteration_safety < 5000:
+                made_progress = False
+                for item in monitor_queues[:]:
+                    q = item['queue']
+                    if not q:
+                        monitor_queues.remove(item)
+                        continue
+
+                    cand_idx = q[0]
+                    cand_hours = pool.loc[cand_idx, 'Hours']
+                    cand_type = pool.loc[cand_idx, 'Тип']
+
+                    if cand_hours == 0:
+                        if add_log_func:
+                            add_log_func(cand_idx, f"Пропущен (Монитор): нулевые часы (ПФ: {pf_name})")
+                        q.popleft()
+                        if not q: monitor_queues.remove(item)
+                        continue
+
+                    if current_hours + cand_hours <= limit_hours + 0.5:
+                        selected_indices.append(cand_idx)
+                        current_hours += cand_hours
+                        monitor_count_selected += 1
+                        current_count += 1
+                        q.popleft()
+                        made_progress = True
+                        if not q: monitor_queues.remove(item)
+                        if monitor_count_selected >= max_monitors: break
+                    else:
+                        if add_log_func:
+                            add_log_func(cand_idx, f"Пропущен (Монитор): превышен лимит часов (ПФ: {pf_name}, Тип: {cand_type})")
+
+                if not made_progress: break
+                iteration_safety += 1
+
+            iteration_safety = 0
+            while other_queues and other_count_selected < max_others and iteration_safety < 5000:
+                made_progress = False
+                for item in other_queues[:]:
+                    q = item['queue']
+                    if not q:
+                        other_queues.remove(item)
+                        continue
+
+                    cand_idx = q[0]
+                    cand_hours = pool.loc[cand_idx, 'Hours']
+                    cand_type = pool.loc[cand_idx, 'Тип']
+
+                    if cand_hours == 0:
+                        if add_log_func:
+                            add_log_func(cand_idx, f"Пропущен (Другое): нулевые часы (ПФ: {pf_name})")
+                        q.popleft()
+                        if not q: other_queues.remove(item)
+                        continue
+
+                    if current_hours + cand_hours <= limit_hours + 0.5:
+                        selected_indices.append(cand_idx)
+                        current_hours += cand_hours
+                        other_count_selected += 1
+                        current_count += 1
+                        q.popleft()
+                        made_progress = True
+                        if not q: other_queues.remove(item)
+                    else:
+                        if add_log_func:
+                            add_log_func(cand_idx, f"Пропущен (Другое): превышен лимит часов (ПФ: {pf_name}, Тип: {cand_type})")
+
+                if not made_progress: break
+                iteration_safety += 1
+
+        if selected_indices:
+            result_slice = pool.loc[selected_indices]
+            comp_series = result_slice['Тип'].value_counts()
+            comp_str = ", ".join([f"{t}: {c}" for t, c in comp_series.items()])
+        else: comp_str = "-"
+
+        return selected_indices, round(current_hours, 2), comp_str
+
+    # ============================================
+
+    def run_logic(self, folder_path):
+        dk_path = os.path.join(folder_path, "ДК.xlsx")
+        ref_path = os.path.join(folder_path, "Справочник.xlsx")
+
+        if not os.path.exists(dk_path) or not os.path.exists(ref_path):
+            messagebox.showerror("Ошибка", "Файлы не найдены!")
+            return
+
+        self.log("Загрузка данных...")
+
+        target_date = datetime.now().date()
+        date_label = "Сегодня"
+        if self.date_choice.get() == "tomorrow":
+            target_date = (datetime.now() + timedelta(days=1)).date()
+            date_label = "Завтра"
+
+        self.log(f"Расчет выполняется на дату: {target_date} ({date_label})")
+
+        self.progress['value'] = 10
+        self.root.update_idletasks()
+
+        try:
+            xls = pd.ExcelFile(ref_path)
+
+            # Ищем листы по точным названиям
+            sheet_names = [name.strip() for name in xls.sheet_names]
+
+            # Лист с мощностью (ПФ)
+            if 'мощность' not in sheet_names:
+                messagebox.showerror("Ошибка", "В справочнике не найден лист 'мощность'")
+                return
+            df_power = pd.read_excel(ref_path, sheet_name='мощность')
+
+            # Лист с часами (КТР)
+            if 'КТР' not in sheet_names:
+                messagebox.showerror("Ошибка", "В справочнике не найден лист 'КТР'")
+                return
+            df_hours = pd.read_excel(ref_path, sheet_name='КТР')
+
+            # Лист с приоритетами
+            priority_dict = {}
+            if 'Приоритет' in sheet_names:
+                try:
+                    df_priority = pd.read_excel(ref_path, sheet_name='Приоритет')
+                    df_priority.columns = df_priority.columns.str.strip()
+                    # Создаем словарь: активность -> приоритет
+                    for idx, row in df_priority.iterrows():
+                        activity = str(row.iloc[0]).strip() if len(row) > 0 else ''
+                        priority = int(self.safe_float(row.iloc[1])) if len(row) > 1 else 999
+                        if activity and activity.lower() not in ['nan', '']:
+                            priority_dict[activity] = priority
+                    self.log(f"Загружено {len(priority_dict)} активностей с приоритетами")
+                except Exception as e:
+                    self.log(f"Предупреждение: Не удалось загрузить лист 'Приоритет' из справочника: {e}")
+            else:
+                self.log("Предупреждение: В справочнике не найден лист 'Приоритет'")
+        except Exception as e:
+            messagebox.showerror("Ошибка", f"Справочник: {e}")
+            return
+
+        df_power.columns = df_power.columns.str.strip()
+        df_hours.columns = df_hours.columns.str.strip()
+
+        pf_power_dict = {str(row.iloc[0]).strip(): self.safe_float(row.iloc[1]) for idx, row in df_power.iterrows()}
+        type_hours_dict = {str(row.iloc[0]).strip().lower(): self.safe_float(row.iloc[1]) for idx, row in df_hours.iterrows()}
+
+        # === ЧТЕНИЕ КОЛОНОК ===
+        pf_limit_zno_dict = {}
+        pf_monitor_pct_dict = {}
+
+        if 'Ограничение ЗНО в день' in df_power.columns:
+            pf_limit_zno_dict = {str(row.iloc[0]).strip(): int(self.safe_float(row['Ограничение ЗНО в день'])) for idx, row in df_power.iterrows()}
+
+        if 'Пропорции по мониторам' in df_power.columns:
+            for idx, row in df_power.iterrows():
+                val = self.safe_float(row['Пропорции по мониторам'])
+                if val <= 1.0 and val > 0.0: val *= 100
+                pf_monitor_pct_dict[str(row.iloc[0]).strip()] = val
+        # ============================
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            df_dk = pd.read_excel(dk_path)
+
+        df_dk.columns = df_dk.columns.str.strip()
+
+        if 'Log' not in df_dk.columns: df_dk['Log'] = ""
+        df_dk['Log'] = df_dk['Log'].fillna('')
+
+        if 'Период' not in df_dk.columns:
+            df_dk['Is_Excluded'] = False
+        else:
+            exclude_values = ['Проект']
+            df_dk['Is_Excluded'] = df_dk['Период'].astype(str).str.strip().isin(exclude_values)
+            df_dk.loc[df_dk['Is_Excluded'], 'Log'] = "Исключено: " + df_dk.loc[df_dk['Is_Excluded'], 'Период'].astype(str)
+            self.log(f"Исключено строк из планирования (Период): {df_dk['Is_Excluded'].sum()}")
+
+        if 'Маркер активности' not in df_dk.columns:
+            messagebox.showerror("Ошибка", "В файле ДК не найден столбец 'Маркер активности'.")
+            return
+
+        df_dk['Status'] = "ОК"
+        df_dk['Возраст, лет'] = pd.to_numeric(df_dk['Возраст, лет'], errors='coerce').fillna(0)
+        df_dk['Is_Replacement'] = False
+        df_dk['Hours'] = 0.0
+
+        # === ШАГ: РАСЧЕТ ПРИОРИТЕТА ТЕХНИКИ ПО АКТИВНОСТЯМ ===
+        if 'Домен' in df_dk.columns:
+            def calculate_activity_priority(domains):
+                if pd.isna(domains) or str(domains).strip() == '':
+                    return 999  # Самый низкий приоритет для техники без активностей
+
+                domain_list = [d.strip() for d in str(domains).split(',')]
+                min_priority = 999
+                for domain in domain_list:
+                    if domain in priority_dict:
+                        min_priority = min(min_priority, priority_dict[domain])
+                return min_priority
+
+            df_dk['Activity_Priority'] = df_dk['Домен'].apply(calculate_activity_priority)
+            self.log("Рассчитаны приоритеты техники по активностям")
+        else:
+            df_dk['Activity_Priority'] = 999
+            self.log("Столбец 'Домен' не найден, все техники имеют одинаковый приоритет")
+        # ============================================
+
+        # === ШАГ: АНАЛИЗ ФИО (ПОВТОРЯЮЩИЕСЯ ЗАПИСИ) ===
+        if 'ФИО' in df_dk.columns:
+            # Подсчет количества записей по каждому ФИО
+            fio_counts = df_dk['ФИО'].value_counts()
+            # ФИО с количеством >= 4 считаем как "всегда на рабочем месте"
+            fio_permanent = set(fio_counts[fio_counts >= 4].index)
+            df_dk['Is_FIO_Permanent'] = df_dk['ФИО'].isin(fio_permanent)
+            self.log(f"Найдено {len(fio_permanent)} ФИО с 4+ записями (не учитываются отсутствия)")
+        else:
+            df_dk['Is_FIO_Permanent'] = False
+            self.log("Столбец 'ФИО' не найден, проверка отсутствий для повторяющихся ФИО не выполняется")
+        # ==============================================
+
+        date_col_zno = 'ЗНО на Техрефреш: дата создания'
+        if date_col_zno in df_dk.columns:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                df_dk[date_col_zno] = pd.to_datetime(df_dk[date_col_zno], errors='coerce').dt.tz_localize(None)
+
+        def add_log(idx, message, is_error=False):
+            curr = str(df_dk.loc[idx, 'Log'])
+            df_dk.loc[idx, 'Log'] = f"{curr}; {message}" if curr else message
+            if is_error and df_dk.loc[idx, 'Status'] == 'ОК':
+                df_dk.loc[idx, 'Status'] = "Ошибка"
+
+        # Расчет часов и проверка ПФ
+        for idx, row in df_dk.iterrows():
+            dk_type = str(row['Тип']).strip().lower()
+            if pd.isna(row['Тип']) or dk_type == '':
+                add_log(idx, "Тип пустой", is_error=True)
+            elif dk_type not in TYPE_MAPPING:
+                add_log(idx, f"Тип '{row['Тип']}' не найден в правилах", is_error=True)
+            else:
+                ref_t = TYPE_MAPPING[dk_type]
+                if ref_t.lower() not in type_hours_dict:
+                    add_log(idx, f"Нет часов для типа '{ref_t}'", is_error=True)
+                else:
+                    df_dk.loc[idx, 'Hours'] = type_hours_dict[ref_t.lower()]
+
+            pf_name = str(row['Адрес ПФ']).strip()
+            if pd.isna(row['Адрес ПФ']) or pf_name == '':
+                add_log(idx, "ПФ пустой", is_error=True)
+            elif pf_name not in pf_power_dict:
+                add_log(idx, f"ПФ '{pf_name}' не найден в справочнике. Установлен лимит 12ч.")
+
+        # === ШАГ 1: ПРОВЕРКА ОТСУТСТВИЯ ===
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            df_dk['ВК отсутствует с'] = pd.to_datetime(df_dk['ВК отсутствует с'], errors='coerce').dt.tz_localize(None)
+            df_dk['ВК отсутствует по'] = pd.to_datetime(df_dk['ВК отсутствует по'], errors='coerce').dt.tz_localize(None)
+
+        check_end_date = target_date + timedelta(days=5)
+        for idx, row in df_dk.iterrows():
+            s, e = row['ВК отсутствует с'], row['ВК отсутствует по']
+            if pd.notna(s) and pd.notna(e):
+                s_date = s.date()
+                e_date = e.date()
+                # Пропускаем проверку отсутствия для ФИО с 4+ записями
+                if df_dk.loc[idx, 'Is_FIO_Permanent']:
+                    continue  # Такие записи всегда считаются на рабочем месте
+                if (s_date <= check_end_date) and (e_date >= target_date):
+                    add_log(idx, "ВК отсутствует")
+        # ======================================
+
+        self.log("Анализ отказников и избытка...")
+        excess_by_pf = {}
+        found_replacements = []  # Список словарей с данными о заменах
+
+        def is_zno_empty(val):
+            if pd.isna(val): return True
+            return str(val).strip() in ['', '-']
+
+        # === ШАГ 2: ПОИСК ЗАМЕН (НОВЫЕ УСЛОВИЯ) ===
+        # Условия:
+        # 1. ПФ пополнен (пустой/0)
+        # 2. Не исключен
+        # 3. ЗНО на Техрефреш (пустой) ИЛИ группировка "2.7 Перевыставить ЗНО"
+        # 4. ВК не отсутствует
+        # 5. Дата исполнения ЗНО на пополнение ПФ не более 2 месяцев от текущей даты
+        #    (если ЗНО на пополнение ПФ есть и дата старше 2 месяцев - исключаем)
+        # 6. Для отказников: дата исполнения ЗНО на Техрефреш должна быть старше 2 дней
+
+        # Проверка даты исполнения ЗНО на пополнение ПФ (не более 2 месяцев)
+        date_col_replenishment = 'ЗНО на пополнение ПФ: дата исполнения'
+        if date_col_replenishment in df_dk.columns:
+            # Конвертируем даты
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                df_dk[date_col_replenishment] = pd.to_datetime(df_dk[date_col_replenishment], errors='coerce').dt.tz_localize(None)
+            # Вычисляем дату 2 месяцев назад от целевой даты
+            two_months_ago = target_date - timedelta(days=60)
+            # Создаем маску: True если дата исполнения >= 2 месяцев назад ИЛИ ЗНО на пополнение ПФ пустой
+            df_dk['Is_Replenishment_Valid'] = (
+                                                      df_dk[date_col_replenishment].dt.date >= two_months_ago
+                                              ) | df_dk['ЗНО на пополнение ПФ'].apply(is_zno_empty)
+            self.log(f"Проверка даты исполнения ЗНО на пополнение ПФ: дата не более 2 месяцев от {target_date}")
+        else:
+            df_dk['Is_Replenishment_Valid'] = True
+            self.log(f"Столбец '{date_col_replenishment}' не найден, проверка даты не выполняется")
+
+        candidates_df = df_dk[
+            (
+                    (df_dk['ПФ пополнен'].isna()) | (df_dk['ПФ пополнен'] == 0) |
+                    (df_dk['ПФ пополнен'].astype(str).str.strip() == '0') |
+                    (df_dk['ПФ пополнен'].astype(str).str.strip() == '')
+            ) &
+            (~df_dk['Is_Excluded']) &
+            (
+                    (df_dk['ЗНО на Техрефреш'].apply(is_zno_empty)) |
+                    (df_dk['Результат Техрефреш: группировка'].astype(str).str.strip().str.contains(r'2\.7.*Перевыставить', na=False))
+            ) &
+            (~df_dk['Log'].str.contains("ВК отсутствует")) &
+            (df_dk['Is_Replenishment_Valid'])
+            ].sort_values(by='Возраст, лет', ascending=False)
+
+        grouped_candidates = candidates_df.groupby(['Адрес ПФ', 'Тип', 'Маркер активности']).groups
+
+        refused_rows = df_dk[
+            df_dk['Результат Техрефреш: группировка'].astype(str).str.startswith(('2.1', '2.2')) &
+            (~df_dk['Is_Excluded'])
+            ]
+
+        # Проверка даты исполнения ЗНО на Техрефреш для отказников (должна быть старше 2 дней)
+        date_col_zno_execution = 'ЗНО на Техрефреш: дата исполнения'
+        two_days_ago = None
+        if date_col_zno_execution in df_dk.columns:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                df_dk[date_col_zno_execution] = pd.to_datetime(df_dk[date_col_zno_execution], errors='coerce').dt.tz_localize(None)
+            two_days_ago = target_date - timedelta(days=2)
+            self.log(f"Проверка даты исполнения ЗНО на Техрефреш: замена ищется только если дата исполнения < {two_days_ago.strftime('%d.%m.%Y')}")
+
+        # Словарь для хранения дат ЗНО на пополнение ПФ по номеру ЗНО
+        zno_replenishment_dates = {}
+        date_col_replenishment = 'ЗНО на пополнение ПФ: дата исполнения'
+        zno_col = 'ЗНО на пополнение ПФ'
+        if date_col_replenishment in df_dk.columns and zno_col in df_dk.columns:
+            # Создаем словарь: номер ЗНО -> дата исполнения
+            for idx, row in df_dk.iterrows():
+                zno_num = str(row.get(zno_col, '')).strip() if pd.notna(row.get(zno_col, '')) else ''
+                if zno_num and zno_num != '-':
+                    zno_date = df_dk.loc[idx, date_col_replenishment]
+                    if pd.notna(zno_date):
+                        zno_date_parsed = pd.to_datetime(zno_date).replace(tzinfo=None)
+                        if hasattr(zno_date_parsed, 'date'):
+                            zno_replenishment_dates[zno_num] = zno_date_parsed.date()
+
+        for idx, refused_row in refused_rows.iterrows():
+            pf, tp = refused_row['Адрес ПФ'], refused_row['Тип']
+
+            is_pf_replenished = (refused_row['ПФ пополнен'] == 1 or str(refused_row['ПФ пополнен']).strip() == '1')
+
+            if not is_pf_replenished:
+                continue
+
+            # Проверка даты исполнения ЗНО на Техрефреш для отказников
+            # Замена не ищется, если дата исполнения вчера или сегодня (меньше 2 дней назад)
+            if two_days_ago is not None:
+                zno_exec_date = df_dk.loc[idx, date_col_zno_execution]
+                if pd.notna(zno_exec_date):
+                    exec_date = pd.to_datetime(zno_exec_date).replace(tzinfo=None).date()
+                    # Если дата исполнения >= 2 дней назад (т.е. вчера, сегодня или позже), пропускаем
+                    if exec_date >= two_days_ago:
+                        add_log(idx, f"ЗНО на Техрефреш слишком свежий ({exec_date.strftime('%d.%m.%Y')}), замена не требуется")
+                        excess_by_pf[pf] = excess_by_pf.get(pf, 0) + 1
+                        continue
+
+            # Проверка даты исполнения ЗНО на пополнение ПФ для отказника
+            # Приоритет 1: ЗНО на пополнение ПФ: дата исполнения (если номер ЗНО >= 13 символов)
+            # Приоритет 2: ЗНО на пополнение ПФ: дата создания (если номер ЗНО >= 13 символов)
+            # Приоритет 3: Доп. параметр 2 (номер ЗНО) -> поиск даты в словаре (если номер >= 13 символов)
+            date_to_check = None
+            correct_zno = ''  # Корректный номер ЗНО (13+ символов)
+
+            # Получаем номер ЗНО из основного поля
+            refusal_zno_field = refused_row.get('ЗНО на пополнение ПФ', '')
+            zno_from_field = str(refusal_zno_field).strip() if pd.notna(refusal_zno_field) else ''
+
+            # Получаем номер из Доп. параметр 2
+            zno_ref = str(refused_row.get('Доп. параметр 2', '')).strip() if pd.notna(refused_row.get('Доп. параметр 2', '')) else ''
+
+            # Если номер в основном поле >= 13 символов
+            if len(zno_from_field) >= 13:
+                correct_zno = zno_from_field
+                # Проверяем дату исполнения
+                if date_col_replenishment in df_dk.columns:
+                    replenishment_date = df_dk.loc[idx, date_col_replenishment]
+                    if pd.notna(replenishment_date):
+                        replenishment_dt = pd.to_datetime(replenishment_date, errors='coerce').replace(tzinfo=None)
+                        if pd.notna(replenishment_dt) and hasattr(replenishment_dt, 'date'):
+                            date_to_check = replenishment_dt.date()
+
+                # Если дата не найдена, проверяем дату создания
+                if date_to_check is None:
+                    date_col_create = 'ЗНО на пополнение ПФ: дата создания'
+                    if date_col_create in df_dk.columns:
+                        create_date = df_dk.loc[idx, date_col_create]
+                        if pd.notna(create_date):
+                            create_date_str = str(create_date).strip()
+                            if create_date_str and create_date_str != '-':
+                                create_dt = pd.to_datetime(create_date, errors='coerce').replace(tzinfo=None)
+                                if pd.notna(create_dt) and hasattr(create_dt, 'date'):
+                                    date_to_check = create_dt.date()
+
+            # Если дата не найдена и есть корректный номер в Доп. параметр 2 (>= 13 символов)
+            if date_to_check is None and len(zno_ref) >= 13:
+                correct_zno = zno_ref  # Используем номер из Доп. параметр 2
+                # Ищем этот номер в столбце "ЗНО на пополнение ПФ"
+                if zno_ref in zno_replenishment_dates:
+                    date_to_check = zno_replenishment_dates[zno_ref]
+                else:
+                    # ЗНО не найдено в файле
+                    add_log(idx, f"ЗНО '{zno_ref}' из Доп. параметр 2 не найдено в столбце 'ЗНО на пополнение ПФ'")
+                    excess_by_pf[pf] = excess_by_pf.get(pf, 0) + 1
+                    continue
+
+            # Если дата не найдена, пропускаем отказника
+            if date_to_check is None:
+                add_log(idx, f"Нет даты исполнения ЗНО на пополнение ПФ")
+                excess_by_pf[pf] = excess_by_pf.get(pf, 0) + 1
+                continue
+
+            # Проверяем - не старше ли 2 месяцев от текущей даты
+            two_months_from_now = target_date + timedelta(days=60)  # 2 месяца вперед
+            if date_to_check > two_months_from_now:
+                add_log(idx, f"ЗНО на пополнение ПФ слишком поздний ({date_to_check.strftime('%d.%m.%Y')}), замена не требуется")
+                excess_by_pf[pf] = excess_by_pf.get(pf, 0) + 1
+                continue
+
+            marker = refused_row['Маркер активности']
+            key = (pf, tp, marker)
+
+            found = False
+            if key in grouped_candidates:
+                indices = grouped_candidates[key]
+                if len(indices) > 0:
+                    match_idx = indices[0]
+
+                    refusal_sn = str(refused_row.get('Серийный номер', 'N/A')).strip()
+                    candidate_sn = str(df_dk.loc[match_idx, 'Серийный номер']).strip()
+
+                    df_dk.loc[match_idx, 'Is_Replacement'] = True
+                    add_log(match_idx, f"ЗАМЕНА ДЛЯ ОТКАЗНИКА (SN: {refusal_sn})")
+                    add_log(idx, f"ЗАМЕНА НАЙДЕНА (Кандидат SN: {candidate_sn})")
+
+                    # Сохраняем данные о замене
+                    # refusal_zno должно содержать 13+ символов (уже проверено выше)
+                    found_replacements.append({
+                        'candidate_idx': match_idx,
+                        'refusal_sn': refusal_sn,
+                        'refusal_zno': correct_zno  # Используем корректный номер ЗНО (13+ символов)
+                    })
+
+                    grouped_candidates[key] = indices[1:]
+                    found = True
+
+            if not found:
+                add_log(idx, "ИЗБЫТОК: Нет замены")
+                excess_by_pf[pf] = excess_by_pf.get(pf, 0) + 1
+        # ======================================
+
+        # ШАГ 3: Формирование пула планирования
+        selected_indices = []
+        for idx, row in df_dk.iterrows():
+            pf_name = str(row['Адрес ПФ']).strip() if pd.notna(row['Адрес ПФ']) else 'N/A'
+
+            # Пропускаем исключенные
+            if df_dk.loc[idx, 'Is_Excluded']:
+                add_log(idx, f"Исключено: по периоду (ПФ: {pf_name})")
+                continue
+            # Пропускаем с ошибками
+            if df_dk.loc[idx, 'Status'] == "Ошибка":
+                add_log(idx, f"Ошибка в данных (ПФ: {pf_name})")
+                continue
+            # Проверка отсутствия ВК (для обычных записей)
+            if "ВК отсутствует" in df_dk.loc[idx, 'Log']:
+                add_log(idx, f"ВК отсутствует (ПФ: {pf_name})")
+                continue
+
+            pf_pop = row['ПФ пополнен']
+            is_rep = row['Is_Replacement']
+            is_pf_rep = (pf_pop == 1 or str(pf_pop).strip() == '1')
+            group_result = str(row.get('Результат Техрефреш: группировка', '')).strip()
+            is_transferred_zno = '2.7' in group_result and 'Перевыставить' in group_result
+
+            # Проверка ПФ пополнен или замена
+            if not is_pf_rep and not is_rep:
+                add_log(idx, f"ПФ не пополнен и не замена (ПФ: {pf_name})")
+                continue
+            # Для обычных записей: проверка ЗНО на Техрефреш
+            # Для группировки 2.7: даже если есть ЗНО на техрефреш - включаем в пул
+            if not is_transferred_zno and not is_zno_empty(row['ЗНО на Техрефреш']):
+                add_log(idx, f"Есть ЗНО на Техрефреш (ПФ: {pf_name}, ЗНО: {str(row['ЗНО на Техрефреш']).strip()})")
+                continue
+            # Проверка даты исполнения ЗНО на пополнение ПФ (для обычных записей, не для группировки 2.7)
+            if not is_transferred_zno:
+                date_col_replenishment = 'ЗНО на пополнение ПФ: дата исполнения'
+                if date_col_replenishment in df_dk.columns:
+                    if pd.notna(row[date_col_replenishment]):
+                        replenishment_date = pd.to_datetime(row[date_col_replenishment]).replace(tzinfo=None).date()
+                        two_months_ago = target_date - timedelta(days=60)
+                        if replenishment_date < two_months_ago:
+                            add_log(idx, f"ЗНО на пополнение ПФ старше 2 месяцев ({replenishment_date.strftime('%d.%m.%Y')}) (ПФ: {pf_name})")
+                            continue
+
+            selected_indices.append(idx)
+            if is_transferred_zno:
+                add_log(idx, f">>> ВЫБРАН В ПУЛ (ПФ: {pf_name}, Группировка: {group_result}, ПЕРЕВЫСТАВЛЕНИЕ ЗНО)")
+            else:
+                add_log(idx, f">>> ВЫБРАН В ПУЛ (ПФ: {pf_name}, Группировка: {group_result})")
+
+        valid_pool = df_dk.loc[selected_indices].copy()
+
+        final_indices = []
+        stats_table = []
+        plan_distribution = {}
+
+        final_adjusted_indices = []
+        adjusted_stats_table = []
+
+        self.log("Расчет статистики отказов (ПФ + Тип)...")
+
+        # Расчет периода: последние 30 дней от текущей даты
+        start_date_30days = target_date - timedelta(days=30)
+        end_date = target_date
+
+        self.log(f"Период для аналитики отказов: {start_date_30days.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')} (последние 30 дней)")
+
+        closed_pool = df_dk[df_dk['ЗНО на Техрефреш'].notna() & (df_dk['ЗНО на Техрефреш'].astype(str).str.strip() != '-')].copy()
+
+        if date_col_zno in closed_pool.columns:
+            closed_pool = closed_pool[
+                (closed_pool[date_col_zno].dt.date >= start_date_30days) &
+                (closed_pool[date_col_zno].dt.date <= end_date)
+                ]
+        else:
+            self.log("Предупреждение: Столбец даты создания не найден, аналитика считается за все время.")
+
+        all_bad_results = [
+            '2.2. Пользователь отказался от замены насовсем',
+            '2.8. Не соответствует критериям техрефреша',
+            '2.1. Пользователь или АРМ не найден',
+            '1.2. Техника заменена раннее',
+            '2.3. ВК отказался от проведения работ',
+            '4.1. Оборудование не найдено',
+            '2.3. Пользователь перенес работы на другое время',
+            '2.4. Отсутствует оборудование на ПФ'
+        ]
+
+        pf_type_fail_rates = {}
+        failure_stats = []
+
+        for (pf, tp), group in closed_pool.groupby(['Адрес ПФ', 'Тип']):
+            total = len(group)
+            fails = len(group[group['Результат Техрефреш: группировка'].isin(all_bad_results)])
+            if total > 0:
+                rate = round((fails / total) * 100, 1)
+                failure_stats.append({'pf': pf, 'type': tp, 'total': total, 'fails': fails, 'rate': rate})
+                pf_type_fail_rates[(pf, tp)] = rate
+
+        unique_pfs = sorted(valid_pool['Адрес ПФ'].unique(), key=str)
+
+        for pf in unique_pfs:
+            if pd.isna(pf): continue
+
+            limit = pf_power_dict.get(pf, 12)
+            limit_zno = pf_limit_zno_dict.get(pf)
+            monitor_pct = pf_monitor_pct_dict.get(pf, 0.0)
+
+            if limit_zno:
+                self.log(f"PF: {pf} | Limit: {limit_zno} | Monitor %: {monitor_pct}")
+
+            pf_pool = valid_pool[valid_pool['Адрес ПФ'] == pf].copy()
+            if pf_pool.empty: continue
+
+            # Стандартный план
+            idx_all, hours_all, str_all = self.calculate_composition_uniform(
+                pf_pool, limit, limit_zno=limit_zno, monitor_pct=monitor_pct, pf_name=pf, add_log_func=add_log
+            )
+
+            for i in idx_all: add_log(i, f">>> ВЫБРАН (ПФ: {pf}, Группа: {str_all})")
+            final_indices.extend(idx_all)
+
+            stats_table.append({
+                'pf': pf, 'count': len(idx_all), 'hours': hours_all,
+                'excess': excess_by_pf.get(pf, 0), 'comp_all': str_all, 'comp_plan': str_all
+            })
+
+            # Логирование записей, которые были в пуле, но не попали в план
+            if len(pf_pool) > len(idx_all):
+                not_selected = pf_pool[~pf_pool.index.isin(idx_all)]
+                for idx, row in not_selected.iterrows():
+                    group_result = str(row.get('Результат Техрефреш: группировка', '')).strip()
+                    is_transferred_zno = '2.7' in group_result and 'Перевыставить' in group_result
+                    if is_transferred_zno:
+                        add_log(idx, f"НЕ ВЫБРАН В ПЛАН (ПФ: {pf}, есть в пуле, но лимит часов/ЗНО) (Группировка: {group_result})")
+                    else:
+                        add_log(idx, f"НЕ ВЫБРАН В ПЛАН (ПФ: {pf}, есть в пуле, но лимит часов/ЗНО)")
+
+            # Подсчет записей с группировкой 2.7 отдельно
+            transferred_count = 0
+            if idx_all:
+                res_slice = df_dk.loc[idx_all]
+                transferred_count = len(res_slice[res_slice['Результат Техрефреш: группировка'].astype(str).str.contains(r'2\.7.*Перевыставить', na=False)])
+            if transferred_count > 0:
+                stats_table[-1]['comp_all'] = f"{str_all} | 2.7: {transferred_count}" if str_all else f"2.7: {transferred_count}"
+
+            res_slice = df_dk.loc[idx_all]
+            for t in res_slice['Тип']: plan_distribution[t] = plan_distribution.get(t, 0) + 1
+
+            # Вероятностный план
+            idx_adj, std_h_adj, eff_h_adj, str_adj, avg_fail_rate = self.calculate_adjusted_composition_uniform(
+                pf_pool, limit, pf_type_fail_rates, pf, limit_zno=limit_zno, monitor_pct=monitor_pct, add_log_func=add_log
+            )
+
+            for i in idx_adj: add_log(i, f">>> ВЫБРАН В ВЕР-НЫЙ ПЛАН (ПФ: {pf}, Группа: {str_adj})")
+            final_adjusted_indices.extend(idx_adj)
+
+            adjusted_stats_table.append({
+                'pf': pf,
+                'count': len(idx_adj),
+                'hours_std': std_h_adj,
+                'hours_eff': eff_h_adj,
+                'fail_rate_used': f"{avg_fail_rate}%",
+                'comp': str_adj
+            })
+
+        total_zno_std = sum(d['count'] for d in stats_table)
+        total_hours_std = sum(d['hours'] for d in stats_table)
+        total_excess = sum(d['excess'] for d in stats_table)
+        self.lbl_total_plan.config(text=f"ИТОГО: ЗНО: {total_zno_std} | Часов: {total_hours_std} | Избыток: {total_excess}")
+
+        total_zno_adj = sum(d['count'] for d in adjusted_stats_table)
+        total_hours_std_adj = sum(d['hours_std'] for d in adjusted_stats_table)
+        total_hours_eff_adj = sum(d['hours_eff'] for d in adjusted_stats_table)
+        self.lbl_total_adj.config(text=f"ИТОГО: ЗНО: {total_zno_adj} | Станд.Часов: {total_hours_std_adj} | Эфф.Часов: {total_hours_eff_adj}")
+
+        self.found_replacements_data_store = []
+        self.plan_data_store = stats_table
+        self.fail_data_store = sorted(failure_stats, key=lambda x: x['rate'], reverse=True)
+        self.adjusted_plan_data_store = adjusted_stats_table
+
+        self.entry_search_plan.delete(0, tk.END)
+        self.entry_search_fail.delete(0, tk.END)
+        self.entry_search_adj.delete(0, tk.END)
+
+        self.search_plan()
+        self.search_failures()
+        self.search_adjusted()
+
+        self.progress['value'] = 90
+        timestamp = datetime.now().strftime("%d.%m.%Y")
+        output_path = os.path.join(folder_path, f"План_ЗНО_{timestamp}.xlsx")
+
+        def clean_dates(df):
+            for col in df.columns:
+                if pd.api.types.is_datetime64_any_dtype(df[col]):
+                    if hasattr(df[col].dtype, 'tz') and df[col].dtype.tz is not None:
+                        df[col] = df[col].dt.tz_localize(None)
+            return df
+
+        writer = pd.ExcelWriter(output_path, engine='openpyxl')
+
+        if final_indices:
+            result_df = df_dk.loc[final_indices].copy()
+            result_df['Причина'] = result_df.apply(
+                lambda x: 'Замена отказника' if x['Is_Replacement'] else (
+                    'Плановый рефреш (Перевыставка)' if '2.7' in str(x.get('Результат Техрефреш: группировка', '')).strip() and 'Перевыставить' in str(x.get('Результат Техрефреш: группировка', '')).strip() else 'Плановый рефреш'
+                ), axis=1
+            )
+            result_df = clean_dates(result_df)
+            result_df = self.add_semicolon_to_serial(result_df)
+            result_df.to_excel(writer, sheet_name='План ЗНО (Стандарт)', index=False)
+        else:
+            pd.DataFrame().to_excel(writer, sheet_name='План ЗНО (Стандарт)', index=False)
+
+        pd.DataFrame(stats_table).to_excel(writer, sheet_name='Сводный план (Стандарт)', index=False)
+
+        if final_adjusted_indices:
+            result_adj_df = df_dk.loc[final_adjusted_indices].copy()
+            result_adj_df['Причина'] = result_adj_df.apply(
+                lambda x: 'Замена отказника' if x['Is_Replacement'] else (
+                    'Плановый рефреш (Перевыставка)' if '2.7' in str(x.get('Результат Техрефреш: группировка', '')).strip() and 'Перевыставить' in str(x.get('Результат Техрефреш: группировка', '')).strip() else 'Плановый рефреш'
+                ), axis=1
+            )
+            result_adj_df = clean_dates(result_adj_df)
+            result_adj_df = self.add_semicolon_to_serial(result_adj_df)
+            result_adj_df.to_excel(writer, sheet_name='План ЗНО (Вероятн)', index=False)
+        else:
+            pd.DataFrame().to_excel(writer, sheet_name='План ЗНО (Вероятн)', index=False)
+
+        pd.DataFrame(adjusted_stats_table).to_excel(writer, sheet_name='Сводный план (Вероятн)', index=False)
+
+        if found_replacements:
+            # Создаем список записей для листа "Найденные замены"
+            replacements_list = []
+            for rep in found_replacements:
+                idx = rep['candidate_idx']
+                row = df_dk.loc[idx]
+                replacements_list.append({
+                    'ПФ': str(row['Адрес ПФ']).strip() if pd.notna(row['Адрес ПФ']) else '-',
+                    'Тип': str(row['Тип']).strip(),
+                    'Серийный номер': str(row['Серийный номер']).strip() if pd.notna(row['Серийный номер']) else '-',
+                    'Серийник Отказника': rep['refusal_sn'],
+                    'ЗНО ПФ отказника': rep['refusal_zno'],
+                    'Вероятн. план': '✅ Да' if idx in final_adjusted_indices else '❌ Нет'
+                })
+            replacements_df = pd.DataFrame(replacements_list)
+            replacements_df = clean_dates(replacements_df)
+            replacements_df = self.add_semicolon_to_serial(replacements_df)
+            replacements_df.to_excel(writer, sheet_name='Найденные Замены', index=False)
+        else:
+            pd.DataFrame().to_excel(writer, sheet_name='Найденные Замены', index=False)
+
+        skipped_df = df_dk[
+            (df_dk['Status'] == "Ошибка") |
+            (df_dk['Log'].str.contains("ИЗБЫТОК")) |
+            (df_dk['Log'].str.contains("ВК отсутствует")) |
+            (df_dk['Is_Excluded']) |
+            (df_dk['Log'].str.contains("ПФ не пополнен")) |
+            ((df_dk['Log'].str.contains("Есть ЗНО на Техрефреш")) & (~df_dk['Результат Техрефреш: группировка'].astype(str).str.contains(r'2\.7.*Перевыставить', na=False)))
+            ].copy()
+
+        if not skipped_df.empty:
+            skipped_df = clean_dates(skipped_df)
+            skipped_df = self.add_semicolon_to_serial(skipped_df)
+            skipped_df.to_excel(writer, sheet_name='Ошибки и Пропуски', index=False)
+        else:
+            pd.DataFrame().to_excel(writer, sheet_name='Ошибки и Пропуски', index=False)
+
+        df_debug = clean_dates(df_dk.copy())
+        
+        df_debug.to_excel(writer, sheet_name='Debug Log', index=False)
+        writer.close()
+
+        self.create_excel_dashboard(df_dk, output_path)
+        self.progress['value'] = 100
+        messagebox.showinfo("Успех", f"Готово!\nПлан сформирован на: {date_label} ({target_date})\nФайл сохранен:\n{output_path}")
+
+    # === ФУНКЦИЯ ВЕРОЯТНОСТЕЙ ===
+    def calculate_adjusted_composition_uniform(self, pool, limit_hours, fail_lookup_dict, pf_name, limit_zno=None, monitor_pct=None, add_log_func=None):
+        current_eff_hours = 0
+        current_std_hours = 0
+        current_count = 0
+        selected_indices = []
+
+        total_rate_sum = 0.0
+        total_items_for_rate = 0
+
+        if not limit_zno:
+            groups = pool.groupby(['Тип', 'Маркер активности'])
+            queues_data = []
+            for (t_type, marker), group_df in groups:
+                # Сортируем по приоритету активности (сначала техника с наименьшим приоритетом), затем по Is_Replacement, затем по возрасту
+                sorted_group = group_df.sort_values(by=['Activity_Priority', 'Is_Replacement', 'Возраст, лет'], ascending=[True, False, False])
+                q = deque(sorted_group.index.tolist())
+                if q:
+                    is_priority_group = sorted_group.iloc[0]['Is_Replacement']
+                    queues_data.append({'queue': q, 'priority': is_priority_group, 'type': t_type, 'marker': marker})
+            queues_data.sort(key=lambda x: not x['priority'])
+
+            iteration_safety = 0
+            while queues_data and iteration_safety < 5000:
+                made_progress = False
+                for item in queues_data[:]:
+                    q = item['queue']
+                    if not q:
+                        queues_data.remove(item)
+                        continue
+
+                    cand_idx = q[0]
+                    std_h = pool.loc[cand_idx, 'Hours']
+                    cand_type = pool.loc[cand_idx, 'Тип']
+                    if std_h == 0:
+                        if add_log_func:
+                            add_log_func(cand_idx, f"Пропущен (Вероятн): нулевые часы (ПФ: {pf_name})")
+                        q.popleft()
+                        if not q: queues_data.remove(item)
+                        continue
+
+                    t_type = item['type']
+                    key = (pf_name, t_type)
+                    rate = fail_lookup_dict.get(key, 0) / 100.0
+                    eff_h = (std_h * (1 - rate)) + (FAILED_TIME_HOURS * rate)
+
+                    if current_eff_hours + eff_h <= limit_hours + 0.5:
+                        selected_indices.append(cand_idx)
+                        current_eff_hours += eff_h
+                        current_std_hours += std_h
+                        total_rate_sum += (rate * 100)
+                        total_items_for_rate += 1
+                        q.popleft()
+                        made_progress = True
+                        if not q: queues_data.remove(item)
+                    else:
+                        if add_log_func:
+                            add_log_func(cand_idx, f"Пропущен (Вероятн): превышен лимит часов (ПФ: {pf_name}, Тип: {cand_type})")
+
+                if not made_progress: break
+                iteration_safety += 1
+        else:
+            groups = pool.groupby(['Тип', 'Маркер активности'])
+            all_queues = []
+            for (t_type, marker), group_df in groups:
+                # Сортируем по приоритету активности (сначала техника с наименьшим приоритетом), затем по Is_Replacement, затем по возрасту
+                sorted_group = group_df.sort_values(by=['Activity_Priority', 'Is_Replacement', 'Возраст, лет'], ascending=[True, False, False])
+                q = deque(sorted_group.index.tolist())
+                if q:
+                    is_priority_group = sorted_group.iloc[0]['Is_Replacement']
+                    is_monitor = 'тр: монитор' in t_type.lower() or 'тр: монитор всп' in t_type.lower()
+                    all_queues.append({
+                        'queue': q,
+                        'priority': is_priority_group,
+                        'type': t_type,
+                        'marker': marker,
+                        'is_monitor': is_monitor
+                    })
+            all_queues.sort(key=lambda x: not x['priority'])
+
+            monitor_queues = [x for x in all_queues if x['is_monitor']]
+            other_queues = [x for x in all_queues if not x['is_monitor']]
+
+            monitor_count_selected = 0
+            other_count_selected = 0
+
+            if monitor_pct and monitor_pct > 0:
+                max_monitors = int(limit_zno * monitor_pct / 100)
+                max_others = limit_zno - max_monitors
+            else:
+                max_monitors = 0
+                max_others = limit_zno
+                other_queues.extend(monitor_queues)
+                monitor_queues = []
+
+            iteration_safety = 0
+            while monitor_queues and monitor_count_selected < max_monitors and iteration_safety < 5000:
+                made_progress = False
+                for item in monitor_queues[:]:
+                    q = item['queue']
+                    if not q:
+                        monitor_queues.remove(item)
+                        continue
+
+                    cand_idx = q[0]
+                    std_h = pool.loc[cand_idx, 'Hours']
+                    cand_type = pool.loc[cand_idx, 'Тип']
+                    if std_h == 0:
+                        if add_log_func:
+                            add_log_func(cand_idx, f"Пропущен (Вероятн Монитор): нулевые часы (ПФ: {pf_name})")
+                        q.popleft()
+                        if not q: monitor_queues.remove(item)
+                        continue
+
+                    t_type = item['type']
+                    key = (pf_name, t_type)
+                    rate = fail_lookup_dict.get(key, 0) / 100.0
+                    eff_h = (std_h * (1 - rate)) + (FAILED_TIME_HOURS * rate)
+
+                    if current_eff_hours + eff_h <= limit_hours + 0.5:
+                        selected_indices.append(cand_idx)
+                        current_eff_hours += eff_h
+                        current_std_hours += std_h
+                        monitor_count_selected += 1
+                        current_count += 1
+                        total_rate_sum += (rate * 100)
+                        total_items_for_rate += 1
+                        q.popleft()
+                        made_progress = True
+                        if not q: monitor_queues.remove(item)
+                        if monitor_count_selected >= max_monitors: break
+
+                if not made_progress: break
+                iteration_safety += 1
+
+            iteration_safety = 0
+            while other_queues and other_count_selected < max_others and iteration_safety < 5000:
+                made_progress = False
+                for item in other_queues[:]:
+                    q = item['queue']
+                    if not q:
+                        other_queues.remove(item)
+                        continue
+
+                    cand_idx = q[0]
+                    std_h = pool.loc[cand_idx, 'Hours']
+                    cand_type = pool.loc[cand_idx, 'Тип']
+                    if std_h == 0:
+                        if add_log_func:
+                            add_log_func(cand_idx, f"Пропущен (Вероятн Другое): нулевые часы (ПФ: {pf_name})")
+                        q.popleft()
+                        if not q: other_queues.remove(item)
+                        continue
+
+                    t_type = item['type']
+                    key = (pf_name, t_type)
+                    rate = fail_lookup_dict.get(key, 0) / 100.0
+                    eff_h = (std_h * (1 - rate)) + (FAILED_TIME_HOURS * rate)
+
+                    if current_eff_hours + eff_h <= limit_hours + 0.5:
+                        selected_indices.append(cand_idx)
+                        current_eff_hours += eff_h
+                        current_std_hours += std_h
+                        other_count_selected += 1
+                        current_count += 1
+                        total_rate_sum += (rate * 100)
+                        total_items_for_rate += 1
+                        q.popleft()
+                        made_progress = True
+                        if not q: other_queues.remove(item)
+
+                if not made_progress: break
+                iteration_safety += 1
+
+        if selected_indices:
+            result_slice = pool.loc[selected_indices]
+            comp_series = result_slice['Тип'].value_counts()
+            comp_str = ", ".join([f"{t}: {c}" for t, c in comp_series.items()])
+        else: comp_str = "-"
+
+        avg_fail_rate = round(total_rate_sum / total_items_for_rate, 1) if total_items_for_rate > 0 else 0.0
+
+        return selected_indices, round(current_std_hours, 2), round(current_eff_hours, 2), comp_str, avg_fail_rate
+
+    def add_semicolon_to_serial(self, df, col_name='Серийный номер'):
+        if col_name in df.columns and len(df) > 0:
+            indices_to_change = df.iloc[:-1].index
+            df.loc[indices_to_change, col_name] = df.loc[indices_to_change, col_name].astype(str) + ";"
+        return df
+
+    def create_excel_dashboard(self, df, output_path):
+        try:
+            from openpyxl import load_workbook, Workbook
+            from openpyxl.chart import PieChart, BarChart, Reference, Series
+            from openpyxl.chart.label import DataLabelList
+            from openpyxl.utils.dataframe import dataframe_to_rows
+            
+            # Загружаем выходной файл
+            wb = load_workbook(output_path)
+            
+            # Создаем лист дашборда
+            if '📊 Дашборд' in wb.sheetnames:
+                del wb['📊 Дашборд']
+            
+            dashboard_ws = wb.create_sheet(title='📊 Дашборд')
+            
+            # Записываем заголовок
+            dashboard_ws['A1'] = 'Аналитический дашборд Техрефреша'
+            dashboard_ws['A1'].font = openpyxl.styles.Font(size=16, bold=True, color='4a90e2')
+            dashboard_ws.merge_cells('A1:G1')
+            
+            # === ГЛАВНЫЕ ПОКАЗАТЕЛИ ===
+            row = 3
+            
+            # Вычисляем текущую дату для проверки избытка
+            target_date = datetime.now().replace(tzinfo=None).date()
+            
+            # Заголовок для главных показателей
+            dashboard_ws[f'A{row}'] = '✅ Главные показатели'
+            dashboard_ws[f'A{row}'].font = openpyxl.styles.Font(size=14, bold=True, color='26c6da')
+            row += 1
+            
+            # Заголовки столбцов
+            dashboard_ws[f'A{row}'] = 'Показатель'
+            dashboard_ws[f'A{row}'].font = openpyxl.styles.Font(size=11, bold=True, color='333333')
+            dashboard_ws[f'B{row}'] = 'Значение'
+            dashboard_ws[f'B{row}'].font = openpyxl.styles.Font(size=11, bold=True, color='333333')
+            dashboard_ws[f'C{row}'] = 'Описание'
+            dashboard_ws[f'C{row}'].font = openpyxl.styles.Font(size=11, bold=True, color='333333')
+            row += 1
+            
+            # Вычисляем показатели
+            # 1. ЗНО в работе
+            df_inwork = df[(df['ЗНО на Техрефреш'].notna()) & (df['ЗНО на Техрефреш'].astype(str).str.strip() != '-')]
+            zno_inwork = len(df_inwork[df_inwork['ЗНО на Техрефреш: статус'].astype(str).str.contains('В работе', na=False)])
+            
+            # 2. Готовы к выставлению
+            # ПФ пополнен = 1 И ЗНО на Техрефреш пустой или "-"
+            def is_zno_empty(val):
+                if pd.isna(val): return True
+                return str(val).strip() in ['', '-']
+            
+            # Проверяем ПФ пополнен (может быть 1, "1", 1.0, "1 ")
+            pf_populated_mask = (
+                (df['ПФ пополнен'] == 1) |
+                (df['ПФ пополнен'].astype(str).str.strip() == '1') |
+                (df['ПФ пополнен'].astype(float) == 1.0)
+            )
+            
+            # Проверяем ЗНО на Техрефреш (пустой или "-")
+            zno_empty_mask = df['ЗНО на Техрефреш'].apply(is_zno_empty)
+            
+            df_ready = df[pf_populated_mask & zno_empty_mask]
+            ready_count = len(df_ready)
+            
+            # 3. Избыток по подменным фондам (детальная таблица)
+            dashboard_ws[f'A{row}'] = '📋 Детализация избытка по подменным фондам'
+            dashboard_ws[f'A{row}'].font = openpyxl.styles.Font(size=12, bold=True, color='e74c3c')
+            row += 1
+            
+            # Подготовка данных по избытку для подменных фондов
+            # Используем те же критерии, что и для общего показателя
+            # 1. Наличие "ИЗБЫТОК" в логе
+            # 2. ПФ пополнен = 1
+            # 3. Дата исполнения ЗНО на пополнение ПФ >= 2 месяцев от текущей даты
+            
+            excess_replacements = []
+            
+            if 'Log' in df.columns:
+                # Сначала находим все записи с ИЗБЫТОК
+                df_excess_temp = df[df['Log'].astype(str).str.contains('ИЗБЫТОК', na=False, case=False)]
+                
+                # Фильтруем по ПФ пополнен = 1
+                for idx, row_data in df_excess_temp.iterrows():
+                    pf_pop = row_data.get('ПФ пополнен', '')
+                    
+                    is_pf_populated = False
+                    try:
+                        if pd.isna(pf_pop):
+                            is_pf_populated = False
+                        elif pf_pop == 1:
+                            is_pf_populated = True
+                        elif str(pf_pop).strip() == '1':
+                            is_pf_populated = True
+                        elif float(pf_pop) == 1.0:
+                            is_pf_populated = True
+                    except:
+                        pass
+                    
+                    if is_pf_populated:
+                        pf_name = str(row_data.get('Адрес ПФ', '')).strip() if pd.notna(row_data.get('Адрес ПФ', '')) else '-'
+                        tech_type = str(row_data.get('Тип', '')).strip() if pd.notna(row_data.get('Тип', '')) else '-'
+                        
+                        # Проверяем дату исполнения ЗНО на пополнение ПФ
+                        # Приоритет 1: ЗНО на пополнение ПФ: дата исполнения (если номер ЗНО >= 13 символов)
+                        # Приоритет 2: ЗНО на пополнение ПФ: дата создания (если номер ЗНО >= 13 символов)
+                        # Приоритет 3: Доп. параметр 2 (номер ЗНО) -> поиск даты в столбце "ЗНО на пополнение ПФ"
+                        date_col_replenishment = 'ЗНО на пополнение ПФ: дата исполнения'
+                        replenishment_date = None
+                        
+                        # Получаем номер ЗНО из основного поля
+                        refusal_zno_field = row_data.get('ЗНО на пополнение ПФ', '')
+                        zno_from_field = str(refusal_zno_field).strip() if pd.notna(refusal_zno_field) else ''
+                        
+                        # Получаем номер из Доп. параметр 2
+                        zno_ref = str(row_data.get('Доп. параметр 2', '')).strip() if pd.notna(row_data.get('Доп. параметр 2', '')) else ''
+                        
+                        correct_zno = ''  # Корректный номер ЗНО (13+ символов)
+                        
+                        # Приоритет 1: Проверяем ЗНО из основного поля
+                        if len(zno_from_field) >= 13:
+                            correct_zno = zno_from_field
+                            # Ищем строку с этим ЗНО в столбце "ЗНО на пополнение ПФ"
+                            mask = (df['ЗНО на пополнение ПФ'].astype(str).str.strip() == correct_zno)
+                            if mask.any():
+                                matching_idx = df[mask].index[0]
+                                replenishment_date = df.loc[matching_idx, date_col_replenishment]
+                        
+                        # Приоритет 2: Проверяем ЗНО из Доп. параметр 2, если не нашли дату
+                        if replenishment_date is None and len(zno_ref) >= 13:
+                            correct_zno = zno_ref
+                            # Ищем этот номер в столбце "ЗНО на пополнение ПФ"
+                            mask = (df['ЗНО на пополнение ПФ'].astype(str).str.strip() == correct_zno)
+                            if mask.any():
+                                matching_idx = df[mask].index[0]
+                                replenishment_date = df.loc[matching_idx, date_col_replenishment]
+                                
+                                # Если дата исполнения не найдена, проверяем дату создания
+                                if pd.isna(replenishment_date):
+                                    date_col_create = 'ЗНО на пополнение ПФ: дата создания'
+                                    if date_col_create in df.columns:
+                                        replenishment_date = df.loc[matching_idx, date_col_create]
+                        
+                        # Проверяем найденную дату
+                        is_valid_date = False  # По умолчанию не валидна
+                        is_found_date = False  # Флаг - дата была найдена
+                        
+                        if pd.notna(replenishment_date):
+                            replenishment_dt = pd.to_datetime(replenishment_date, errors='coerce').replace(tzinfo=None)
+                            if hasattr(replenishment_dt, 'date'):
+                                is_found_date = True
+                                replenishment_date_only = replenishment_dt.date()
+                                # Рассчитываем дату 2 месяцев назад от текущей даты
+                                two_months_ago = target_date - timedelta(days=60)
+                                # Оставляем только если дата >= 2 месяцев назад от текущей даты
+                                # Это означает, что ЗНО на пополнение ПФ был выполнен своевременно
+                                # Но замена для отказника не найдена → реальный избыток
+                                if replenishment_date_only >= two_months_ago:
+                                    is_valid_date = True
+                        
+                        # Если дата не найдена - запись не должна попадать в избыток
+                        if not is_found_date:
+                            continue
+                        
+                        if is_valid_date:
+                            excess_replacements.append({
+                                'ПФ': pf_name,
+                                'Тип': tech_type,
+                                'Серийный номер': str(row_data.get('Серийный номер', '')).strip() if pd.notna(row_data.get('Серийный номер', '')) else '-'
+                            })
+            
+            # Если есть данные по избытку подменных фондов
+            if excess_replacements:
+                excess_df = pd.DataFrame(excess_replacements)
+                
+                # Получаем уникальные ПФ и типы оборудования
+                pf_list = sorted(excess_df['ПФ'].unique().tolist())
+                type_list = sorted(excess_df['Тип'].unique().tolist())
+                
+                dashboard_ws[f'A{row}'] = f'Итог: {len(excess_df)} записей, ПФ: {len(pf_list)}, Типов: {len(type_list)}'
+                dashboard_ws[f'A{row}'].font = openpyxl.styles.Font(size=9, color='999999')
+                row += 1
+                
+                if pf_list and type_list:
+                    # Записываем заголовок таблицы
+                    dashboard_ws[f'A{row}'] = 'Подменный фонд'
+                    dashboard_ws[f'A{row}'].font = openpyxl.styles.Font(size=10, bold=True, color='4a90e2')
+                    
+                    # Строим словарь для строгой связи типа -> колонка
+                    type_to_col = {}
+                    # Добавляем колонки для каждого типа строго по порядку
+                    base_col_idx = 1  # Столбец B (A уже занят заголовком "Подменный фонд")
+                    for tech_type in type_list:
+                        col_letter = chr(65 + base_col_idx)
+                        dashboard_ws[f'{col_letter}{row}'] = tech_type[:25] if len(tech_type) > 25 else tech_type
+                        dashboard_ws[f'{col_letter}{row}'].font = openpyxl.styles.Font(size=9, bold=True, color='4a90e2')
+                        type_to_col[tech_type] = col_letter
+                        base_col_idx += 1
+                    
+                    # Добавляем колонку "Итого по ПФ"
+                    total_pf_col = chr(65 + base_col_idx)
+                    dashboard_ws[f'{total_pf_col}{row}'] = 'Итого по ПФ'
+                    dashboard_ws[f'{total_pf_col}{row}'].font = openpyxl.styles.Font(size=10, bold=True, color='4a90e2')
+                    
+                    row += 1
+                    
+                    # Считаем избыток по каждому ПФ и типу
+                    pf_type_counts = {}
+                    for pf in pf_list:
+                        pf_type_counts[pf] = {}
+                        for tech_type in type_list:
+                            count = len(excess_df[(excess_df['ПФ'] == pf) & (excess_df['Тип'] == tech_type)])
+                            pf_type_counts[pf][tech_type] = count
+                    
+                    # Записываем данные по каждому ПФ
+                    pf_totals = {}  # Итого по каждому ПФ
+                    type_totals = {}  # Итого по каждому типу
+                    
+                    for pf in pf_list:
+                        dashboard_ws[f'A{row}'] = pf[:30] if len(pf) > 30 else pf
+                        dashboard_ws[f'A{row}'].font = openpyxl.styles.Font(size=9)
+                        
+                        pf_total = 0
+                        for tech_type in type_list:
+                            count = pf_type_counts[pf].get(tech_type, 0)
+                            # Используем словарь type_to_col для получения правильной колонки
+                            col = type_to_col.get(tech_type)
+                            if col:
+                                dashboard_ws[f'{col}{row}'] = count
+                                dashboard_ws[f'{col}{row}'].font = openpyxl.styles.Font(size=9)
+                                pf_total += count
+                                
+                                # Считаем итого по типу
+                                type_totals[tech_type] = type_totals.get(tech_type, 0) + count
+                        
+                        dashboard_ws[f'{total_pf_col}{row}'] = pf_total
+                        dashboard_ws[f'{total_pf_col}{row}'].font = openpyxl.styles.Font(size=9, bold=True, color='e74c3c')
+                        pf_totals[pf] = pf_total
+                        row += 1
+                    
+                    # Добавляем строку "Итого по типам"
+                    dashboard_ws[f'A{row}'] = 'Итого по типам'
+                    dashboard_ws[f'A{row}'].font = openpyxl.styles.Font(size=10, bold=True, color='27ae60')
+                    
+                    total_all = 0
+                    for tech_type in type_list:
+                        count = type_totals.get(tech_type, 0)
+                        col = type_to_col.get(tech_type)
+                        if col:
+                            dashboard_ws[f'{col}{row}'] = count
+                            dashboard_ws[f'{col}{row}'].font = openpyxl.styles.Font(size=10, bold=True, color='27ae60')
+                            total_all += count
+                    
+                    dashboard_ws[f'{total_pf_col}{row}'] = total_all
+                    dashboard_ws[f'{total_pf_col}{row}'].font = openpyxl.styles.Font(size=10, bold=True, color='27ae60')
+                    
+                    row += 2  # Пустая строка перед следующим разделом
+                    
+                    # Данные уже готовы в excess_replacements и excess_df, не нужно пересчитывать
+                    excess_count = len(excess_replacements)
+                    
+                    row += 2  # Пустая строка перед следующим разделом
+            
+            # 4. Процент успешного техрефреша
+            df_closed = df[(df['ЗНО на Техрефреш'].notna()) & (df['ЗНО на Техрефреш'].astype(str).str.strip() != '-')]
+            # Проверяем, содержит ли результат начальные цифры и точку, затем 1.1 или 1.2
+            success_count = len(df_closed[
+                df_closed['Результат Техрефреш: группировка'].astype(str).str.contains(r'^(\d+\.\d+\.?\s*)?(1\.1|1\.2)', na=False, case=False, regex=True)
+            ])
+            success_rate = round((success_count / len(df_closed) * 100) if len(df_closed) > 0 else 0, 1)
+            
+            # 5. Среднее время закрытия
+            df_closed_with_dates = df_closed.copy()
+            df_closed_with_dates['created'] = pd.to_datetime(df_closed_with_dates['ЗНО на Техрефреш: дата создания'], errors='coerce').dt.tz_localize(None)
+            df_closed_with_dates['closed'] = pd.to_datetime(df_closed_with_dates['ЗНО на Техрефреш: дата исполнения'], errors='coerce').dt.tz_localize(None)
+            df_closed_with_dates['days'] = (df_closed_with_dates['closed'] - df_closed_with_dates['created']).dt.days
+            avg_days = round(df_closed_with_dates['days'].dropna().mean(), 1) if len(df_closed_with_dates['days'].dropna()) > 0 else 0
+            
+            # 6. Процент выполнения плана по активностям
+            df_with_domain = df[df['Домен'].notna() & (df['Домен'].astype(str).str.strip() != '') & (df['Домен'].astype(str).str.strip() != '-')].copy()
+            domain_plan = {}
+            for domains in df_with_domain['Домен']:
+                if pd.notna(domains):
+                    for d in str(domains).split(','):
+                        domain = d.strip()
+                        if domain:
+                            domain_plan[domain] = domain_plan.get(domain, {'total': 0, 'completed': 0})
+                            domain_plan[domain]['total'] += 1
+                            if pd.notna(df_with_domain.loc[df_with_domain['Домен'].astype(str).str.contains(domain, na=False), 'ЗНО на Техрефреш'].values[0]):
+                                domain_plan[domain]['completed'] += 1
+            
+            # Записываем главные показатели
+            metrics = [
+                ('1. ЗНО в работе (статус "В работе")', zno_inwork, 'Количество ЗНО с текущим статусом "В работе"'),
+                ('2. Готовы к выставлению', ready_count, 'У ПФ стоит 1, но ЗНО не выставлено'),
+                ('3. Избыток по подменным фондам', excess_count, 'Отказались от рефреша, заменить некем (см. детализацию ниже)'),
+                ('4. Успешный техрефреш (1.1, 1.2)', f"{success_count} ({success_rate}%)", 'Процент группировок 1.1. и 1.2.'),
+                ('5. Среднее время закрытия ЗНО', f"{avg_days} дней", 'Среднее количество дней на закрытие ЗНО'),
+                ('6. Выполнение плана по активностям', '-', 'См. лист "Выполнение плана"'),
+            ]
+            
+            for metric_name, metric_value, metric_desc in metrics:
+                dashboard_ws[f'A{row}'] = metric_name
+                dashboard_ws[f'A{row}'].font = openpyxl.styles.Font(size=10)
+                dashboard_ws[f'B{row}'] = metric_value
+                dashboard_ws[f'B{row}'].font = openpyxl.styles.Font(size=10, bold=True, color='4a90e2')
+                dashboard_ws[f'C{row}'] = metric_desc
+                dashboard_ws[f'C{row}'].font = openpyxl.styles.Font(size=9, color='666666')
+                row += 1
+            
+            # Добавляем таблицу выполнения плана на лист Дашборд (сразу после строки "6. Выполнение плана по активностям")
+            dashboard_ws[f'A{row}'] = '📋 Выполнение плана по активностям'
+            dashboard_ws[f'A{row}'].font = openpyxl.styles.Font(size=12, bold=True, color='333333')
+            row += 1
+            
+            dashboard_ws[f'A{row}'] = 'Активность'
+            dashboard_ws[f'B{row}'] = 'Всего в плане'
+            dashboard_ws[f'C{row}'] = 'Выполнено (есть ЗНО)'
+            dashboard_ws[f'D{row}'] = 'Процент'
+            dashboard_ws[f'A{row}'].font = openpyxl.styles.Font(size=10, bold=True)
+            dashboard_ws[f'B{row}'].font = openpyxl.styles.Font(size=10, bold=True)
+            dashboard_ws[f'C{row}'].font = openpyxl.styles.Font(size=10, bold=True)
+            dashboard_ws[f'D{row}'].font = openpyxl.styles.Font(size=10, bold=True)
+            row += 1
+            
+            df_with_domain = df[df['Домен'].notna() & (df['Домен'].astype(str).str.strip() != '') & (df['Домен'].astype(str).str.strip() != '-')].copy()
+            domain_plan = {}
+            for idx, row_data in df_with_domain.iterrows():
+                domains = str(row_data.get('Домен', '')).strip()
+                if pd.notna(domains) and domains:
+                    for d in domains.split(','):
+                        domain = d.strip()
+                        if domain:
+                            if domain not in domain_plan:
+                                domain_plan[domain] = {'total': 0, 'completed': 0}
+                            domain_plan[domain]['total'] += 1
+                            zno = row_data.get('ЗНО на Техрефреш', '')
+                            if pd.notna(zno) and str(zno).strip() != '-':
+                                domain_plan[domain]['completed'] += 1
+            
+            for domain, data in sorted(domain_plan.items()):
+                dashboard_ws[f'A{row}'] = domain
+                dashboard_ws[f'B{row}'] = data['total']
+                dashboard_ws[f'C{row}'] = data['completed']
+                pct = round(data['completed'] / data['total'] * 100, 1) if data['total'] > 0 else 0
+                dashboard_ws[f'D{row}'] = f"{pct}%"
+                if pct >= 80:
+                    dashboard_ws[f'D{row}'].font = openpyxl.styles.Font(size=10, color='50c878', bold=True)
+                elif pct >= 50:
+                    dashboard_ws[f'D{row}'].font = openpyxl.styles.Font(size=10, color='f2d94a', bold=True)
+                else:
+                    dashboard_ws[f'D{row}'].font = openpyxl.styles.Font(size=10, color='e24a33', bold=True)
+                row += 1
+            
+            row += 1  # Пустая строка перед диаграммами
+            
+            # 1. Распределение по типам оборудования (Круговая диаграмма)
+            type_counts = df['Тип'].value_counts()
+            
+            # Записываем данные в столбцах A-B, диаграмма будет в столбце D
+            dashboard_ws[f'A{row}'] = 'Распределение по типам оборудования'
+            dashboard_ws[f'A{row}'].font = openpyxl.styles.Font(size=12, bold=True)
+            row += 1
+            
+            for i, (type_name, count) in enumerate(type_counts.items()):
+                dashboard_ws[f'A{row + i}'] = type_name
+                dashboard_ws[f'B{row + i}'] = count
+            
+            # Создаем круговую диаграмму - размещаем со строки M34 (Диаграмма "По типам оборудования")
+            pie = PieChart()
+            labels = Reference(dashboard_ws, min_col=1, min_row=row, max_row=row + len(type_counts) - 1)
+            data = Reference(dashboard_ws, min_col=2, min_row=row - 1, max_row=row + len(type_counts) - 1)
+            pie.add_data(data, titles_from_data=True)
+            pie.set_categories(labels)
+            pie.title = "По типам оборудования"
+            pie.height = 12
+            pie.width = 12
+            
+            # Добавляем метки данных
+            pie.datalabels = DataLabelList()
+            pie.datalabels.showVal = True
+            pie.datalabels.showPercent = True
+            pie.datalabels.showLeaderLines = True
+            
+            # Размещаем диаграмму со строки M34
+            dashboard_ws.add_chart(pie, "M34")
+            row = row + len(type_counts) + 2  # Переходим после данных в столбце A-B
+            
+            # 2. Распределение по результатам техрефреша (Горизонтальная столбчатая)
+            result_counts = df['Результат Техрефреш: группировка'].value_counts()
+            
+            dashboard_ws[f'A{row}'] = 'Распределение по результатам техрефреша'
+            dashboard_ws[f'A{row}'].font = openpyxl.styles.Font(size=12, bold=True)
+            row += 1
+            
+            for i, (result, count) in enumerate(result_counts.items()):
+                dashboard_ws[f'A{row + i}'] = str(result) if pd.notna(result) else 'Нет данных'
+                dashboard_ws[f'B{row + i}'] = count
+            
+            # Создаем горизонтальную столбчатую диаграмму - размещаем со строки F3
+            bar = BarChart()
+            bar.type = "col"
+            bar.style = 10
+            bar.title = "По результатам техрефреша"
+            bar.y_axis.title = 'Количество'
+            bar.x_axis.title = 'Результат'
+            
+            labels = Reference(dashboard_ws, min_col=1, min_row=row, max_row=row + len(result_counts) - 1)
+            data = Reference(dashboard_ws, min_col=2, min_row=row - 1, max_row=row + len(result_counts) - 1)
+            bar.add_data(data, titles_from_data=True)
+            bar.set_categories(labels)
+            bar.height = 15
+            bar.width = 20
+            
+            # Добавляем метки данных для столбцов
+            bar.datalabels = DataLabelList()
+            bar.datalabels.showVal = True
+            bar.datalabels.showPercent = True
+            bar.datalabels.showLeaderLines = True
+            
+            # Размещаем диаграмму со строки F3
+            dashboard_ws.add_chart(bar, "F3")
+            row = row + len(result_counts) + 2  # Переходим после данных в столбце A-B
+            
+            # 3. Статусы ЗНО (Круговая диаграмма)
+            status_counts = df['ЗНО на Техрефреш: статус'].value_counts()
+            
+            dashboard_ws[f'A{row}'] = 'Статусы ЗНО на техрефреш'
+            dashboard_ws[f'A{row}'].font = openpyxl.styles.Font(size=12, bold=True)
+            row += 1
+            
+            for i, (status, count) in enumerate(status_counts.items()):
+                dashboard_ws[f'A{row + i}'] = str(status) if pd.notna(status) else 'Нет данных'
+                dashboard_ws[f'B{row + i}'] = count
+            
+            # Создаем круговую диаграмму - размещаем со строки F34
+            pie2 = PieChart()
+            labels2 = Reference(dashboard_ws, min_col=1, min_row=row, max_row=row + len(status_counts) - 1)
+            data2 = Reference(dashboard_ws, min_col=2, min_row=row - 1, max_row=row + len(status_counts) - 1)
+            pie2.add_data(data2, titles_from_data=True)
+            pie2.set_categories(labels2)
+            pie2.title = "Статусы ЗНО"
+            pie2.height = 12
+            pie2.width = 12
+            
+            # Добавляем метки данных
+            pie2.datalabels = DataLabelList()
+            pie2.datalabels.showVal = True
+            pie2.datalabels.showPercent = True
+            pie2.datalabels.showLeaderLines = True
+            
+            # Размещаем диаграмму со строки F34
+            dashboard_ws.add_chart(pie2, "F34")
+            row = row + len(status_counts) + 2  # Переходим после данных в столбце A-B
+            
+            # 3. Топ ПФ по количеству (Столбчатая диаграмма)
+            pf_counts = df['Адрес ПФ'].value_counts().head(10)
+            
+            dashboard_ws[f'A{row}'] = 'Топ-10 ПФ по количеству ЗНО'
+            dashboard_ws[f'A{row}'].font = openpyxl.styles.Font(size=12, bold=True)
+            row += 1
+            
+            for i, (pf, count) in enumerate(pf_counts.items()):
+                dashboard_ws[f'A{row + i}'] = str(pf)[:30] if pd.notna(pf) else 'Нет данных'
+                dashboard_ws[f'B{row + i}'] = count
+            
+            # Создаем столбчатую диаграмму - размещаем со строки Q3
+            bar2 = BarChart()
+            bar2.type = "col"
+            bar2.style = 10
+            bar2.title = "Топ-10 ПФ"
+            bar2.y_axis.title = 'Количество'
+            bar2.x_axis.title = 'ПФ'
+            
+            labels3 = Reference(dashboard_ws, min_col=1, min_row=row, max_row=row + len(pf_counts) - 1)
+            data3 = Reference(dashboard_ws, min_col=2, min_row=row - 1, max_row=row + len(pf_counts) - 1)
+            bar2.add_data(data3, titles_from_data=True)
+            bar2.set_categories(labels3)
+            bar2.height = 12
+            bar2.width = 20
+            
+            # Добавляем метки данных для столбцов
+            bar2.datalabels = DataLabelList()
+            bar2.datalabels.showVal = True
+            bar2.datalabels.showLeaderLines = True
+            
+            # Размещаем диаграмму со строки Q3
+            dashboard_ws.add_chart(bar2, "Q3")
+            
+            row += 1  # Пустая строка
+            
+            # === ТАБЛИЦА НЕДЕЛЬНОЙ ДИНАМИКИ ===
+            dashboard_ws[f'A{row}'] = '📅 Недельная динамика по типам техрефреша (начиная с начала года)'
+            dashboard_ws[f'A{row}'].font = openpyxl.styles.Font(size=12, bold=True, color='26c6da')
+            row += 1
+            
+            # Находим начало текущего года
+            year_start = datetime(target_date.year, 1, 1).date()
+            
+            # Конвертируем даты создания ЗНО
+            date_col_create = 'ЗНО на Техрефреш: дата создания'
+            if date_col_create in df.columns:
+                df[date_col_create] = pd.to_datetime(df[date_col_create], errors='coerce').dt.tz_localize(None)
+                
+                # Получаем только закрытые ЗНО (с датой создания)
+                df_closed = df[df[date_col_create].notna()].copy()
+                
+                if len(df_closed) > 0:
+                    # Извлекаем даты создания
+                    df_closed['create_date'] = df_closed[date_col_create].dt.date
+                    
+                    # Получаем уникальные типы оборудования
+                    type_list = df_closed['Тип'].dropna().unique().tolist()
+                    
+                    if type_list:
+                        # Находим первую и последнюю дату создания
+                        min_date = df_closed['create_date'].min()
+                        max_date = df_closed['create_date'].max()
+                        
+                        # Генерируем список недель с начала года
+                        # Сначала создаем колонку с датой понедельника для каждой записи
+                        def get_monday(date):
+                            if pd.isna(date):
+                                return None
+                            # weekday(): Monday=0, Sunday=6
+                            days_since_monday = date.weekday()
+                            monday = date - timedelta(days=days_since_monday)
+                            return monday
+                        
+                        df_closed['week_start'] = df_closed[date_col_create].apply(get_monday)
+                        
+                        # Получаем уникальные недели (конвертируем datetime в date для сравнения)
+                        unique_weeks_dates = []
+                        for week_start in df_closed['week_start'].dropna().unique():
+                            if hasattr(week_start, 'date'):
+                                unique_weeks_dates.append(week_start.date())
+                            else:
+                                unique_weeks_dates.append(week_start)
+                        unique_weeks = sorted(set(unique_weeks_dates))
+                        
+                        weeks_data = []
+                        week_num = 1
+                        for week_start in unique_weeks:
+                            # Пропускаем недели, которые полностью до начала года
+                            # week_start может быть datetime или date
+                            week_start_date = week_start
+                            if hasattr(week_start, 'date'):
+                                week_start_date = week_start.date()
+                            elif isinstance(week_start, str):
+                                week_start_date = datetime.strptime(week_start, '%Y-%m-%d').date()
+                            
+                            if week_start_date >= year_start:
+                                week_end = week_start_date + timedelta(days=6)
+                                weeks_data.append({
+                                    'week_num': week_num,
+                                    'start': week_start_date,
+                                    'end': week_end
+                                })
+                                week_num += 1
+                        
+                        # Создаем заголовок таблицы
+                        col = 0  # Столбец A
+                        dashboard_ws[f'{chr(65 + col)}{row}'] = 'Тип'
+                        dashboard_ws[f'{chr(65 + col)}{row}'].font = openpyxl.styles.Font(size=10, bold=True)
+                        
+                        # Добавляем колонки для каждой недели
+                        week_cols = []
+                        for week in weeks_data:
+                            col += 1
+                            week_label = f"{week['week_num']} неделя ({week['start'].strftime('%d.%m')}-{week['end'].strftime('%d.%m')})"
+                            dashboard_ws[f'{chr(65 + col)}{row}'] = week_label
+                            dashboard_ws[f'{chr(65 + col)}{row}'].font = openpyxl.styles.Font(size=9, bold=True)
+                            week_cols.append(chr(65 + col))
+                        
+                        row += 1
+                        
+                        # Заполняем данные по каждому типу
+                        type_totals = {}  # Словарь для хранения суммы по каждому типу
+                        for tech_type in type_list:
+                            dashboard_ws[f'{chr(65)}{row}'] = tech_type
+                            dashboard_ws[f'{chr(65)}{row}'].font = openpyxl.styles.Font(size=9)
+                            
+                            # Считаем количество ЗНО для каждого типа за каждую неделю
+                            type_data = df_closed[df_closed['Тип'] == tech_type]
+                            type_total = 0
+                            
+                            for i, week in enumerate(weeks_data):
+                                if i < len(week_cols):
+                                    # Используем новую колонку 'week_start' для точного совпадения
+                                    # Конвертируем week_start в date для сравнения
+                                    week_start_date = week['start']
+                                    if hasattr(week_start_date, 'date'):
+                                        week_start_date = week_start_date.date()
+                                    # Конвертируем колонку week_start в date
+                                    week_counts = type_data['week_start'].apply(
+                                        lambda x: x.date() if hasattr(x, 'date') else x
+                                    )
+                                    week_count = len(week_counts[week_counts == week_start_date])
+                                    dashboard_ws[f'{week_cols[i]}{row}'] = week_count
+                                    dashboard_ws[f'{week_cols[i]}{row}'].font = openpyxl.styles.Font(size=9)
+                                    type_total += week_count
+                            
+                            type_totals[tech_type] = type_total
+                            row += 1
+                        
+                        # Добавляем строку "Итого"
+                        dashboard_ws[f'{chr(65)}{row}'] = 'Итого'
+                        dashboard_ws[f'{chr(65)}{row}'].font = openpyxl.styles.Font(size=10, bold=True, color='4a90e2')
+                        
+                        total_all_weeks = 0
+                        prev_week_total = None
+                        for i, week in enumerate(weeks_data):
+                            if i < len(week_cols):
+                                # Считаем реальный итог за неделю по всем типам
+                                week_total = 0
+                                for tech_type in type_list:
+                                    type_data = df_closed[df_closed['Тип'] == tech_type]
+                                    week_start_date = week['start']
+                                    if hasattr(week_start_date, 'date'):
+                                        week_start_date = week_start_date.date()
+                                    week_counts = type_data['week_start'].apply(
+                                        lambda x: x.date() if hasattr(x, 'date') else x
+                                    )
+                                    week_total += len(week_counts[week_counts == week_start_date])
+                                
+                                dashboard_ws[f'{week_cols[i]}{row}'] = week_total
+                                
+                                # Добавляем процентную динамику
+                                if prev_week_total is not None and prev_week_total > 0:
+                                    change_pct = round((week_total - prev_week_total) / prev_week_total * 100, 1)
+                                    change_text = f" ({'+' if change_pct >= 0 else ''}{change_pct}%)"
+                                    dashboard_ws[f'{week_cols[i]}{row}'] = f"{week_total}{change_text}"
+                                    
+                                    # Цвет для прироста или падения
+                                    if change_pct > 0:
+                                        dashboard_ws[f'{week_cols[i]}{row}'].font = openpyxl.styles.Font(size=10, bold=True, color='27ae60')  # Зеленый для прироста
+                                    elif change_pct < 0:
+                                        dashboard_ws[f'{week_cols[i]}{row}'].font = openpyxl.styles.Font(size=10, bold=True, color='e74c3c')  # Красный для падения
+                                    else:
+                                        dashboard_ws[f'{week_cols[i]}{row}'].font = openpyxl.styles.Font(size=10, bold=True, color='27ae60')
+                                else:
+                                    dashboard_ws[f'{week_cols[i]}{row}'].font = openpyxl.styles.Font(size=10, bold=True, color='27ae60')
+                                
+                                total_all_weeks += week_total
+                                prev_week_total = week_total
+                        
+                        # Добавляем столбец "Сумма за все недели" для каждого типа
+                        # Найти следующий столбец после последней недели
+                        next_col = week_cols[-1] if week_cols else 'B'
+                        # Получаем номер столбца и добавить 1
+                        next_col_num = ord(next_col[-1]) - ord('A') + 1
+                        next_col_letter = chr(ord('A') + next_col_num)
+                        
+                        # Записываем заголовок столбца "Сумма"
+                        # Возвращаемся на строку с заголовком таблицы (row сейчас указывает на строку после "Итого")
+                        header_row = row - len(type_list) - 1  # Возвращаемся к строке заголовка
+                        dashboard_ws[f'{next_col_letter}{header_row}'] = 'Сумма за все недели'
+                        dashboard_ws[f'{next_col_letter}{header_row}'].font = openpyxl.styles.Font(size=10, bold=True)
+                        
+                        # Записываем суммы для каждого типа (начиная со строки с первым типом)
+                        type_row = header_row + 1
+                        for tech_type in type_list:
+                            dashboard_ws[f'{next_col_letter}{type_row}'] = type_totals.get(tech_type, 0)
+                            dashboard_ws[f'{next_col_letter}{type_row}'].font = openpyxl.styles.Font(size=9)
+                            type_row += 1
+                        
+                        # Записываем итог в столбце "Сумма"
+                        dashboard_ws[f'{next_col_letter}{type_row}'] = total_all_weeks
+                        dashboard_ws[f'{next_col_letter}{type_row}'].font = openpyxl.styles.Font(size=10, bold=True, color='27ae60')
+            
+            row += 1  # Пустая строка перед гиперссылками
+            
+            # Автонастройка ширины столбцов
+            dashboard_ws.column_dimensions['A'].width = 30
+            dashboard_ws.column_dimensions['B'].width = 15
+            
+            # === ЛИСТ "ИЗБЫТОК" ===
+            # Создаем отдельный лист с полными строками техники из избытка по подменным фондам
+            # Сначала создаем данные для листа "Избыток" (не сохраняя файл)
+            
+            excess_replacements = []
+            
+            if 'Log' in df.columns:
+                # Находим все записи с ИЗБЫТОК
+                df_excess_temp = df[df['Log'].astype(str).str.contains('ИЗБЫТОК', na=False, case=False)]
+                
+                # Фильтруем по ПФ пополнен = 1
+                for idx, row_data in df_excess_temp.iterrows():
+                    pf_pop = row_data.get('ПФ пополнен', '')
+                    
+                    is_pf_populated = False
+                    try:
+                        if pd.isna(pf_pop):
+                            is_pf_populated = False
+                        elif pf_pop == 1:
+                            is_pf_populated = True
+                        elif str(pf_pop).strip() == '1':
+                            is_pf_populated = True
+                        elif float(pf_pop) == 1.0:
+                            is_pf_populated = True
+                    except:
+                        pass
+                    
+                    if is_pf_populated:
+                        pf_name = str(row_data.get('Адрес ПФ', '')).strip() if pd.notna(row_data.get('Адрес ПФ', '')) else '-'
+                        tech_type = str(row_data.get('Тип', '')).strip() if pd.notna(row_data.get('Тип', '')) else '-'
+                        
+                        # Проверяем дату исполнения ЗНО на пополнение ПФ
+                        # Приоритет 1: ЗНО на пополнение ПФ: дата исполнения (если номер ЗНО >= 13 символов)
+                        # Приоритет 2: ЗНО на пополнение ПФ: дата создания (если номер ЗНО >= 13 символов)
+                        # Приоритет 3: Доп. параметр 2 (номер ЗНО) -> поиск даты в столбце "ЗНО на пополнение ПФ"
+                        date_col_replenishment = 'ЗНО на пополнение ПФ: дата исполнения'
+                        replenishment_date = None
+                        
+                        # Получаем номер ЗНО из основного поля
+                        refusal_zno_field = row_data.get('ЗНО на пополнение ПФ', '')
+                        zno_from_field = str(refusal_zno_field).strip() if pd.notna(refusal_zno_field) else ''
+                        
+                        # Получаем номер из Доп. параметр 2
+                        zno_ref = str(row_data.get('Доп. параметр 2', '')).strip() if pd.notna(row_data.get('Доп. параметр 2', '')) else ''
+                        
+                        correct_zno = ''  # Корректный номер ЗНО (13+ символов)
+                        
+                        # Приоритет 1: Проверяем ЗНО из основного поля
+                        if len(zno_from_field) >= 13:
+                            correct_zno = zno_from_field
+                            # Ищем строку с этим ЗНО в столбце "ЗНО на пополнение ПФ"
+                            mask = (df['ЗНО на пополнение ПФ'].astype(str).str.strip() == correct_zno)
+                            if mask.any():
+                                matching_idx = df[mask].index[0]
+                                replenishment_date = df.loc[matching_idx, date_col_replenishment]
+                        
+                        # Приоритет 2: Проверяем ЗНО из Доп. параметр 2, если не нашли дату
+                        if replenishment_date is None and len(zno_ref) >= 13:
+                            correct_zno = zno_ref
+                            # Ищем этот номер в столбце "ЗНО на пополнение ПФ"
+                            mask = (df['ЗНО на пополнение ПФ'].astype(str).str.strip() == correct_zno)
+                            if mask.any():
+                                matching_idx = df[mask].index[0]
+                                replenishment_date = df.loc[matching_idx, date_col_replenishment]
+                                
+                                # Если дата исполнения не найдена, проверяем дату создания
+                                if pd.isna(replenishment_date):
+                                    date_col_create = 'ЗНО на пополнение ПФ: дата создания'
+                                    if date_col_create in df.columns:
+                                        replenishment_date = df.loc[matching_idx, date_col_create]
+                        
+                        # Проверяем найденную дату
+                        is_valid_date = False  # По умолчанию не валидна
+                        is_found_date = False  # Флаг - дата была найдена
+                        
+                        if pd.notna(replenishment_date):
+                            replenishment_dt = pd.to_datetime(replenishment_date, errors='coerce').replace(tzinfo=None)
+                            if hasattr(replenishment_dt, 'date'):
+                                is_found_date = True
+                                replenishment_date_only = replenishment_dt.date()
+                                # Рассчитываем дату 2 месяцев назад от текущей даты
+                                two_months_ago = target_date - timedelta(days=60)
+                                # Оставляем только если дата >= 2 месяцев назад от текущей даты
+                                # Это означает, что ЗНО на пополнение ПФ был выполнен своевременно
+                                # Но замена для отказника не найдена → реальный избыток
+                                if replenishment_date_only >= two_months_ago:
+                                    is_valid_date = True
+                        
+                        # Если дата не найдена - запись не должна попадать в избыток
+                        if not is_found_date:
+                            continue
+                        
+                        if is_valid_date:
+                            # Создаем полную копию строки с включенными колонками
+                            row_dict = {}
+                            for col in df.columns:
+                                row_dict[col] = row_data.get(col, '')
+                            excess_replacements.append(row_dict)
+            
+            # Сохраняем файл (без листа "Избыток" на данном этапе)
+            wb.save(output_path)
+            self.log("Дашборд с диаграммами успешно создан (с главными показателями и выполнением плана)")
+            
+            # === ЛИСТ "ИЗБЫТОК" ===
+            # Теперь добавляем лист "Избыток" в файл
+            wb = load_workbook(output_path)
+            if 'Избыток' in wb.sheetnames:
+                del wb['Избыток']
+            
+            excess_ws = wb.create_sheet(title='Избыток')
+            
+            # Подготовка данных по избытку для подменных фондов
+            excess_replacements = []
+            
+            if 'Log' in df.columns:
+                # Находим все записи с ИЗБЫТОК
+                df_excess_temp = df[df['Log'].astype(str).str.contains('ИЗБЫТОК', na=False, case=False)]
+                
+                # Фильтруем по ПФ пополнен = 1
+                for idx, row_data in df_excess_temp.iterrows():
+                    pf_pop = row_data.get('ПФ пополнен', '')
+                    
+                    is_pf_populated = False
+                    try:
+                        if pd.isna(pf_pop):
+                            is_pf_populated = False
+                        elif pf_pop == 1:
+                            is_pf_populated = True
+                        elif str(pf_pop).strip() == '1':
+                            is_pf_populated = True
+                        elif float(pf_pop) == 1.0:
+                            is_pf_populated = True
+                    except:
+                        pass
+                    
+                    if is_pf_populated:
+                        pf_name = str(row_data.get('Адрес ПФ', '')).strip() if pd.notna(row_data.get('Адрес ПФ', '')) else '-'
+                        tech_type = str(row_data.get('Тип', '')).strip() if pd.notna(row_data.get('Тип', '')) else '-'
+                        
+                        # Проверяем дату исполнения ЗНО на пополнение ПФ
+                        # Приоритет 1: ЗНО на пополнение ПФ: дата исполнения (если номер ЗНО >= 13 символов)
+                        # Приоритет 2: ЗНО на пополнение ПФ: дата создания (если номер ЗНО >= 13 символов)
+                        # Приоритет 3: Доп. параметр 2 (номер ЗНО) -> поиск даты в столбце "ЗНО на пополнение ПФ"
+                        date_col_replenishment = 'ЗНО на пополнение ПФ: дата исполнения'
+                        replenishment_date = None
+                        
+                        # Получаем номер ЗНО из основного поля
+                        refusal_zno_field = row_data.get('ЗНО на пополнение ПФ', '')
+                        zno_from_field = str(refusal_zno_field).strip() if pd.notna(refusal_zno_field) else ''
+                        
+                        # Получаем номер из Доп. параметр 2
+                        zno_ref = str(row_data.get('Доп. параметр 2', '')).strip() if pd.notna(row_data.get('Доп. параметр 2', '')) else ''
+                        
+                        correct_zno = ''  # Корректный номер ЗНО (13+ символов)
+                        
+                        # Приоритет 1: Проверяем ЗНО из основного поля
+                        if len(zno_from_field) >= 13:
+                            correct_zno = zno_from_field
+                            # Ищем строку с этим ЗНО в столбце "ЗНО на пополнение ПФ"
+                            mask = (df['ЗНО на пополнение ПФ'].astype(str).str.strip() == correct_zno)
+                            if mask.any():
+                                matching_idx = df[mask].index[0]
+                                replenishment_date = df.loc[matching_idx, date_col_replenishment]
+                        
+                        # Приоритет 2: Проверяем ЗНО из Доп. параметр 2, если не нашли дату
+                        if replenishment_date is None and len(zno_ref) >= 13:
+                            correct_zno = zno_ref
+                            # Ищем этот номер в столбце "ЗНО на пополнение ПФ"
+                            mask = (df['ЗНО на пополнение ПФ'].astype(str).str.strip() == correct_zno)
+                            if mask.any():
+                                matching_idx = df[mask].index[0]
+                                replenishment_date = df.loc[matching_idx, date_col_replenishment]
+                                
+                                # Если дата исполнения не найдена, проверяем дату создания
+                                if pd.isna(replenishment_date):
+                                    date_col_create = 'ЗНО на пополнение ПФ: дата создания'
+                                    if date_col_create in df.columns:
+                                        replenishment_date = df.loc[matching_idx, date_col_create]
+                        
+                        # Проверяем найденную дату
+                        is_valid_date = False  # По умолчанию не валидна
+                        is_found_date = False  # Флаг - дата была найдена
+                        
+                        if pd.notna(replenishment_date):
+                            replenishment_dt = pd.to_datetime(replenishment_date, errors='coerce').replace(tzinfo=None)
+                            if hasattr(replenishment_dt, 'date'):
+                                is_found_date = True
+                                replenishment_date_only = replenishment_dt.date()
+                                # Рассчитываем дату 2 месяцев назад от текущей даты
+                                two_months_ago = target_date - timedelta(days=60)
+                                # Оставляем только если дата >= 2 месяцев назад от текущей даты
+                                # Это означает, что ЗНО на пополнение ПФ был выполнен своевременно
+                                # Но замена для отказника не найдена → реальный избыток
+                                if replenishment_date_only >= two_months_ago:
+                                    is_valid_date = True
+                        
+                        # Если дата не найдена - запись не должна попадать в избыток
+                        if not is_found_date:
+                            continue
+                        
+                        if is_valid_date:
+                            # Создаем полную копию строки с включенными колонками
+                            row_dict = {}
+                            for col in df.columns:
+                                row_dict[col] = row_data.get(col, '')
+                            excess_replacements.append(row_dict)
+            
+            try:
+                # Записываем данные на лист "Избыток"
+                if excess_replacements:
+                    # Записываем заголовки
+                    for col_idx, col_name in enumerate(df.columns, start=1):
+                        cell = excess_ws.cell(row=1, column=col_idx, value=col_name)
+                        cell.font = openpyxl.styles.Font(size=10, bold=True, color='4a90e2')
+                    
+                    # Записываем данные
+                    for row_idx, row_data in enumerate(excess_replacements, start=2):
+                        for col_idx, col_name in enumerate(df.columns, start=1):
+                            value = row_data.get(col_name, '')
+                            cell = excess_ws.cell(row=row_idx, column=col_idx, value=value)
+                            cell.font = openpyxl.styles.Font(size=9)
+                    
+                    self.log(f'Лист "Избыток" создан с {len(excess_replacements)} записей')
+                else:
+                    # Записываем заголовки даже если нет данных
+                    for col_idx, col_name in enumerate(df.columns, start=1):
+                        cell = excess_ws.cell(row=1, column=col_idx, value=col_name)
+                        cell.font = openpyxl.styles.Font(size=10, bold=True, color='4a90e2')
+                    
+                    excess_ws.cell(row=2, column=1, value='Нет данных по избытку')
+                
+                # Сохраняем файл после добавления листа "Избыток"
+                wb.save(output_path)
+            
+            except Exception as e:
+                self.log(f"Предупреждение: Не удалось создать дашборд с диаграммами: {str(e)}")
+            
+        except Exception as e:
+            self.log(f"Предупреждение: Не удалось создать дашборд с диаграммами: {str(e)}")
+
+    def add_semicolon_to_serial(self, df, col_name='Серийный номер'):
+        if col_name in df.columns and len(df) > 0:
+            indices_to_change = df.iloc[:-1].index
+            df.loc[indices_to_change, col_name] = df.loc[indices_to_change, col_name].astype(str) + ";"
+        return df
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = TechRefreshApp(root)
+    root.mainloop()
+
