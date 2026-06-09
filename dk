@@ -1453,11 +1453,11 @@ class TechRefreshApp:
             df_ready = df[pf_populated_mask & zno_empty_mask]
             ready_count = len(df_ready)
             
-            # 3. Избыток по подменным фондам (детальная таблица)
-            dashboard_ws[f'A{row}'] = '📋 Детализация избытка по подменным фондам'
-            dashboard_ws[f'A{row}'].font = openpyxl.styles.Font(size=12, bold=True, color='e74c3c')
-            row += 1
-            
+            # 3. Избыток по подменным фондам
+            # Данные считаем здесь (нужны для блока "Главные показатели"),
+            # а детальную таблицу выводим внизу листа — под блоком
+            # "Недельная динамика по типам техрефреша".
+
             # Подготовка данных по избытку для подменных фондов
             # Используем те же критерии, что и для общего показателя
             # 1. Наличие "ИЗБЫТОК" в логе
@@ -1559,98 +1559,10 @@ class TechRefreshApp:
                                 'Серийный номер': str(row_data.get('Серийный номер', '')).strip() if pd.notna(row_data.get('Серийный номер', '')) else '-'
                             })
             
-            # Если есть данные по избытку подменных фондов
-            if excess_replacements:
-                excess_df = pd.DataFrame(excess_replacements)
-                
-                # Получаем уникальные ПФ и типы оборудования
-                pf_list = sorted(excess_df['ПФ'].unique().tolist())
-                type_list = sorted(excess_df['Тип'].unique().tolist())
-                
-                dashboard_ws[f'A{row}'] = f'Итог: {len(excess_df)} записей, ПФ: {len(pf_list)}, Типов: {len(type_list)}'
-                dashboard_ws[f'A{row}'].font = openpyxl.styles.Font(size=9, color='999999')
-                row += 1
-                
-                if pf_list and type_list:
-                    # Записываем заголовок таблицы
-                    dashboard_ws[f'A{row}'] = 'Подменный фонд'
-                    dashboard_ws[f'A{row}'].font = openpyxl.styles.Font(size=10, bold=True, color='4a90e2')
-                    
-                    # Строим словарь для строгой связи типа -> колонка
-                    type_to_col = {}
-                    # Добавляем колонки для каждого типа строго по порядку
-                    base_col_idx = 1  # Столбец B (A уже занят заголовком "Подменный фонд")
-                    for tech_type in type_list:
-                        col_letter = chr(65 + base_col_idx)
-                        dashboard_ws[f'{col_letter}{row}'] = tech_type[:25] if len(tech_type) > 25 else tech_type
-                        dashboard_ws[f'{col_letter}{row}'].font = openpyxl.styles.Font(size=9, bold=True, color='4a90e2')
-                        type_to_col[tech_type] = col_letter
-                        base_col_idx += 1
-                    
-                    # Добавляем колонку "Итого по ПФ"
-                    total_pf_col = chr(65 + base_col_idx)
-                    dashboard_ws[f'{total_pf_col}{row}'] = 'Итого по ПФ'
-                    dashboard_ws[f'{total_pf_col}{row}'].font = openpyxl.styles.Font(size=10, bold=True, color='4a90e2')
-                    
-                    row += 1
-                    
-                    # Считаем избыток по каждому ПФ и типу
-                    pf_type_counts = {}
-                    for pf in pf_list:
-                        pf_type_counts[pf] = {}
-                        for tech_type in type_list:
-                            count = len(excess_df[(excess_df['ПФ'] == pf) & (excess_df['Тип'] == tech_type)])
-                            pf_type_counts[pf][tech_type] = count
-                    
-                    # Записываем данные по каждому ПФ
-                    pf_totals = {}  # Итого по каждому ПФ
-                    type_totals = {}  # Итого по каждому типу
-                    
-                    for pf in pf_list:
-                        dashboard_ws[f'A{row}'] = pf[:30] if len(pf) > 30 else pf
-                        dashboard_ws[f'A{row}'].font = openpyxl.styles.Font(size=9)
-                        
-                        pf_total = 0
-                        for tech_type in type_list:
-                            count = pf_type_counts[pf].get(tech_type, 0)
-                            # Используем словарь type_to_col для получения правильной колонки
-                            col = type_to_col.get(tech_type)
-                            if col:
-                                dashboard_ws[f'{col}{row}'] = count
-                                dashboard_ws[f'{col}{row}'].font = openpyxl.styles.Font(size=9)
-                                pf_total += count
-                                
-                                # Считаем итого по типу
-                                type_totals[tech_type] = type_totals.get(tech_type, 0) + count
-                        
-                        dashboard_ws[f'{total_pf_col}{row}'] = pf_total
-                        dashboard_ws[f'{total_pf_col}{row}'].font = openpyxl.styles.Font(size=9, bold=True, color='e74c3c')
-                        pf_totals[pf] = pf_total
-                        row += 1
-                    
-                    # Добавляем строку "Итого по типам"
-                    dashboard_ws[f'A{row}'] = 'Итого по типам'
-                    dashboard_ws[f'A{row}'].font = openpyxl.styles.Font(size=10, bold=True, color='27ae60')
-                    
-                    total_all = 0
-                    for tech_type in type_list:
-                        count = type_totals.get(tech_type, 0)
-                        col = type_to_col.get(tech_type)
-                        if col:
-                            dashboard_ws[f'{col}{row}'] = count
-                            dashboard_ws[f'{col}{row}'].font = openpyxl.styles.Font(size=10, bold=True, color='27ae60')
-                            total_all += count
-                    
-                    dashboard_ws[f'{total_pf_col}{row}'] = total_all
-                    dashboard_ws[f'{total_pf_col}{row}'].font = openpyxl.styles.Font(size=10, bold=True, color='27ae60')
-                    
-                    row += 2  # Пустая строка перед следующим разделом
-                    
-                    # Данные уже готовы в excess_replacements и excess_df, не нужно пересчитывать
-                    excess_count = len(excess_replacements)
-                    
-                    row += 2  # Пустая строка перед следующим разделом
-            
+            # Детальная таблица избытка выводится внизу листа (после недельной динамики).
+            # Здесь считаем только показатель для блока "Главные показатели".
+            excess_count = len(excess_replacements)
+
             # 4. Процент успешного техрефреша
             df_closed = df[(df['ЗНО на Техрефреш'].notna()) & (df['ЗНО на Техрефреш'].astype(str).str.strip() != '-')]
             # Проверяем, содержит ли результат начальные цифры и точку, затем 1.1 или 1.2
@@ -2059,7 +1971,100 @@ class TechRefreshApp:
                         dashboard_ws[f'{next_col_letter}{type_row}'].font = openpyxl.styles.Font(size=10, bold=True, color='27ae60')
             
             row += 1  # Пустая строка перед гиперссылками
-            
+
+            # === ДЕТАЛИЗАЦИЯ ИЗБЫТКА ПО ПОДМЕННЫМ ФОНДАМ ===
+            # (перенесено вниз листа — под блок "Недельная динамика по типам техрефреша")
+            dashboard_ws[f'A{row}'] = '📋 Детализация избытка по подменным фондам'
+            dashboard_ws[f'A{row}'].font = openpyxl.styles.Font(size=12, bold=True, color='e74c3c')
+            row += 1
+
+            # Если есть данные по избытку подменных фондов
+            if excess_replacements:
+                excess_df = pd.DataFrame(excess_replacements)
+
+                # Получаем уникальные ПФ и типы оборудования
+                pf_list = sorted(excess_df['ПФ'].unique().tolist())
+                type_list = sorted(excess_df['Тип'].unique().tolist())
+
+                dashboard_ws[f'A{row}'] = f'Итог: {len(excess_df)} записей, ПФ: {len(pf_list)}, Типов: {len(type_list)}'
+                dashboard_ws[f'A{row}'].font = openpyxl.styles.Font(size=9, color='999999')
+                row += 1
+
+                if pf_list and type_list:
+                    # Записываем заголовок таблицы
+                    dashboard_ws[f'A{row}'] = 'Подменный фонд'
+                    dashboard_ws[f'A{row}'].font = openpyxl.styles.Font(size=10, bold=True, color='4a90e2')
+
+                    # Строим словарь для строгой связи типа -> колонка
+                    type_to_col = {}
+                    # Добавляем колонки для каждого типа строго по порядку
+                    base_col_idx = 1  # Столбец B (A уже занят заголовком "Подменный фонд")
+                    for tech_type in type_list:
+                        col_letter = chr(65 + base_col_idx)
+                        dashboard_ws[f'{col_letter}{row}'] = tech_type[:25] if len(tech_type) > 25 else tech_type
+                        dashboard_ws[f'{col_letter}{row}'].font = openpyxl.styles.Font(size=9, bold=True, color='4a90e2')
+                        type_to_col[tech_type] = col_letter
+                        base_col_idx += 1
+
+                    # Добавляем колонку "Итого по ПФ"
+                    total_pf_col = chr(65 + base_col_idx)
+                    dashboard_ws[f'{total_pf_col}{row}'] = 'Итого по ПФ'
+                    dashboard_ws[f'{total_pf_col}{row}'].font = openpyxl.styles.Font(size=10, bold=True, color='4a90e2')
+
+                    row += 1
+
+                    # Считаем избыток по каждому ПФ и типу
+                    pf_type_counts = {}
+                    for pf in pf_list:
+                        pf_type_counts[pf] = {}
+                        for tech_type in type_list:
+                            count = len(excess_df[(excess_df['ПФ'] == pf) & (excess_df['Тип'] == tech_type)])
+                            pf_type_counts[pf][tech_type] = count
+
+                    # Записываем данные по каждому ПФ
+                    pf_totals = {}  # Итого по каждому ПФ
+                    type_totals = {}  # Итого по каждому типу
+
+                    for pf in pf_list:
+                        dashboard_ws[f'A{row}'] = pf[:30] if len(pf) > 30 else pf
+                        dashboard_ws[f'A{row}'].font = openpyxl.styles.Font(size=9)
+
+                        pf_total = 0
+                        for tech_type in type_list:
+                            count = pf_type_counts[pf].get(tech_type, 0)
+                            # Используем словарь type_to_col для получения правильной колонки
+                            col = type_to_col.get(tech_type)
+                            if col:
+                                dashboard_ws[f'{col}{row}'] = count
+                                dashboard_ws[f'{col}{row}'].font = openpyxl.styles.Font(size=9)
+                                pf_total += count
+
+                                # Считаем итого по типу
+                                type_totals[tech_type] = type_totals.get(tech_type, 0) + count
+
+                        dashboard_ws[f'{total_pf_col}{row}'] = pf_total
+                        dashboard_ws[f'{total_pf_col}{row}'].font = openpyxl.styles.Font(size=9, bold=True, color='e74c3c')
+                        pf_totals[pf] = pf_total
+                        row += 1
+
+                    # Добавляем строку "Итого по типам"
+                    dashboard_ws[f'A{row}'] = 'Итого по типам'
+                    dashboard_ws[f'A{row}'].font = openpyxl.styles.Font(size=10, bold=True, color='27ae60')
+
+                    total_all = 0
+                    for tech_type in type_list:
+                        count = type_totals.get(tech_type, 0)
+                        col = type_to_col.get(tech_type)
+                        if col:
+                            dashboard_ws[f'{col}{row}'] = count
+                            dashboard_ws[f'{col}{row}'].font = openpyxl.styles.Font(size=10, bold=True, color='27ae60')
+                            total_all += count
+
+                    dashboard_ws[f'{total_pf_col}{row}'] = total_all
+                    dashboard_ws[f'{total_pf_col}{row}'].font = openpyxl.styles.Font(size=10, bold=True, color='27ae60')
+
+                    row += 2  # Пустая строка перед следующим разделом
+
             # Автонастройка ширины столбцов
             dashboard_ws.column_dimensions['A'].width = 30
             dashboard_ws.column_dimensions['B'].width = 15
@@ -2314,4 +2319,3 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = TechRefreshApp(root)
     root.mainloop()
-
