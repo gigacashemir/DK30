@@ -123,16 +123,36 @@ class TechRefreshApp:
                  font=('Segoe UI', 10), bg=self.colors['card'],
                  fg=self.colors['text_secondary']).pack(side='left', padx=(18, 0))
 
+        # === Карточка: что формировать в итоговом файле ===
+        sel_outer, sel_card = self._soft_card(root)
+        sel_outer.pack(pady=(0, 6), padx=24, fill='x')
+        sel_inner = tk.Frame(sel_card, bg=self.colors['card'])
+        sel_inner.pack(pady=12, padx=20, fill='x')
+        tk.Label(sel_inner, text="🗂  Что формировать в итоговом файле",
+                 font=('Segoe UI', 12, 'bold'), bg=self.colors['card'],
+                 fg=self.colors['text_primary']).pack(side='left', padx=(0, 22))
+        self.gen_plan = tk.BooleanVar(value=False)
+        self.gen_dashboard = tk.BooleanVar(value=False)
+        self.gen_excess = tk.BooleanVar(value=False)
+        for _var, _lbl in ((self.gen_plan, "План ЗНО"),
+                           (self.gen_dashboard, "Дашборд"),
+                           (self.gen_excess, "Избыток")):
+            ttk.Checkbutton(sel_inner, text=_lbl, variable=_var,
+                            style='Glass.TCheckbutton',
+                            command=self._update_run_button).pack(side='left', padx=(0, 16))
+
         # === Кнопка запуска (скруглённая, с hover) ===
+        # Появляется только после выбора хотя бы одного листа (см. _update_run_button)
         self.btn_select = self._make_round_button(
             root, "📁    ВЫБРАТЬ ПАПКУ И ЗАПУСТИТЬ РАСЧЁТ", self.process_files,
             bg=self.colors['accent'], hover=self.colors['accent_hover'])
-        self.btn_select.pack(pady=(10, 6))
 
         # === Прогресс-бар ===
         self.progress = ttk.Progressbar(root, orient="horizontal", length=560,
                                         mode="determinate", style='Glass.Horizontal.TProgressbar')
         self.progress.pack(pady=(4, 10), padx=24)
+
+        self._update_run_button()  # кнопка скрыта, пока не выбран ни один лист
 
         # === Вкладки ===
         self.notebook = ttk.Notebook(root)
@@ -181,6 +201,13 @@ class TechRefreshApp:
         style.configure('Glass.TRadiobutton', background=c['card'], foreground=c['text_primary'],
                         font=('Segoe UI', 11))
         style.map('Glass.TRadiobutton',
+                  foreground=[('active', c['accent']), ('selected', c['accent'])],
+                  background=[('active', c['card'])])
+
+        # Чекбоксы на карточке
+        style.configure('Glass.TCheckbutton', background=c['card'], foreground=c['text_primary'],
+                        font=('Segoe UI', 11))
+        style.map('Glass.TCheckbutton',
                   foreground=[('active', c['accent']), ('selected', c['accent'])],
                   background=[('active', c['card'])])
 
@@ -249,6 +276,14 @@ class TechRefreshApp:
         cv.bind('<Leave>', lambda e: cv.itemconfig(rect, fill=bg, outline=bg))
         cv.bind('<Button-1>', lambda e: command())
         return cv
+
+    def _update_run_button(self):
+        """Показывает кнопку запуска только если выбран хотя бы один лист."""
+        if self.gen_plan.get() or self.gen_dashboard.get() or self.gen_excess.get():
+            if not self.btn_select.winfo_ismapped():
+                self.btn_select.pack(pady=(10, 6), before=self.progress)
+        else:
+            self.btn_select.pack_forget()
 
     # === МЕТОДЫ ИНТЕРФЕЙСА ===
     def create_adjusted_tab(self):
@@ -433,6 +468,14 @@ class TechRefreshApp:
             date_label = "Завтра"
 
         self.log(f"Расчет выполняется на дату: {target_date} ({date_label})")
+
+        # Какие листы формировать в итоговом файле (выбор пользователя галками)
+        gen_plan = self.gen_plan.get()
+        gen_dashboard = self.gen_dashboard.get()
+        gen_excess = self.gen_excess.get()
+        if not (gen_plan or gen_dashboard or gen_excess):
+            messagebox.showwarning("Выбор", "Отметьте хотя бы один лист для формирования.")
+            return
 
         self.progress['value'] = 10
         self.root.update_idletasks()
@@ -1045,7 +1088,25 @@ class TechRefreshApp:
         df_debug.to_excel(writer, sheet_name='Debug Log', index=False)
         writer.close()
 
-        self.create_excel_dashboard(df_dk, output_path)
+        # Дашборд/Избыток строим только если они выбраны (иначе пропускаем тяжёлое построение)
+        if gen_dashboard or gen_excess:
+            self.create_excel_dashboard(df_dk, output_path)
+
+        # Оставляем в итоговом файле только выбранные листы
+        from openpyxl import load_workbook as _load_wb
+        _wb = _load_wb(output_path)
+        _keep = set()
+        if gen_plan:
+            _keep |= {'План ЗНО (Вероятн)', 'Сводный план (Вероятн)', 'Найденные Замены', 'Debug Log'}
+        if gen_dashboard:
+            _keep.add('📊 Дашборд')
+        if gen_excess:
+            _keep.add('Избыток')
+        for _name in list(_wb.sheetnames):
+            if _name not in _keep and len(_wb.sheetnames) > 1:
+                del _wb[_name]
+        _wb.save(output_path)
+
         self.progress['value'] = 100
         messagebox.showinfo("Успех", f"Готово!\nПлан сформирован на: {date_label} ({target_date})\nФайл сохранен:\n{output_path}")
 
