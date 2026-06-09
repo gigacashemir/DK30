@@ -397,6 +397,10 @@ class TechRefreshApp:
         current_count = 0
         selected_indices = []
 
+        # Ускорение: точечный доступ к Hours/Тип через dict вместо медленного pool.loc[idx, col]
+        hours_map = pool['Hours'].to_dict()
+        type_map = pool['Тип'].to_dict()
+
         if not limit_zno:
             groups = pool.groupby(['Тип', 'Маркер активности'])
             queues_data = []
@@ -419,8 +423,8 @@ class TechRefreshApp:
                         continue
 
                     cand_idx = q[0]
-                    cand_hours = pool.loc[cand_idx, 'Hours']
-                    cand_type = pool.loc[cand_idx, 'Тип']
+                    cand_hours = hours_map[cand_idx]
+                    cand_type = type_map[cand_idx]
 
                     if cand_hours == 0:
                         if add_log_func:
@@ -486,8 +490,8 @@ class TechRefreshApp:
                         continue
 
                     cand_idx = q[0]
-                    cand_hours = pool.loc[cand_idx, 'Hours']
-                    cand_type = pool.loc[cand_idx, 'Тип']
+                    cand_hours = hours_map[cand_idx]
+                    cand_type = type_map[cand_idx]
 
                     if cand_hours == 0:
                         if add_log_func:
@@ -522,8 +526,8 @@ class TechRefreshApp:
                         continue
 
                     cand_idx = q[0]
-                    cand_hours = pool.loc[cand_idx, 'Hours']
-                    cand_type = pool.loc[cand_idx, 'Тип']
+                    cand_hours = hours_map[cand_idx]
+                    cand_type = type_map[cand_idx]
 
                     if cand_hours == 0:
                         if add_log_func:
@@ -667,6 +671,7 @@ class TechRefreshApp:
             df_dk = pd.read_excel(dk_path)
 
         df_dk.columns = df_dk.columns.str.strip()
+        df_dk.reset_index(drop=True, inplace=True)  # индекс 0..N-1 — нужно для быстрых списков Log/Status/Hours
 
         if 'Log' not in df_dk.columns: df_dk['Log'] = ""
         df_dk['Log'] = df_dk['Log'].fillna('')
@@ -727,11 +732,17 @@ class TechRefreshApp:
                 warnings.simplefilter("ignore")
                 df_dk[date_col_zno] = pd.to_datetime(df_dk[date_col_zno], errors='coerce').dt.tz_localize(None)
 
+        # Ускорение: Log/Status/Hours держим в обычных списках Python и пишем в df_dk
+        # один раз (массовые df.loc[idx, col]=... по 100к строк — главный тормоз цикла).
+        log_list = df_dk['Log'].tolist()
+        status_list = df_dk['Status'].tolist()
+        hours_list = df_dk['Hours'].tolist()
+
         def add_log(idx, message, is_error=False):
-            curr = str(df_dk.loc[idx, 'Log'])
-            df_dk.loc[idx, 'Log'] = f"{curr}; {message}" if curr else message
-            if is_error and df_dk.loc[idx, 'Status'] == 'ОК':
-                df_dk.loc[idx, 'Status'] = "Ошибка"
+            curr = str(log_list[idx])
+            log_list[idx] = f"{curr}; {message}" if curr else message
+            if is_error and status_list[idx] == 'ОК':
+                status_list[idx] = "Ошибка"
 
         # Расчет часов и проверка ПФ
         for idx, row in df_dk.iterrows():
@@ -745,7 +756,7 @@ class TechRefreshApp:
                 if ref_t.lower() not in type_hours_dict:
                     add_log(idx, f"Нет часов для типа '{ref_t}'", is_error=True)
                 else:
-                    df_dk.loc[idx, 'Hours'] = type_hours_dict[ref_t.lower()]
+                    hours_list[idx] = type_hours_dict[ref_t.lower()]
 
             pf_name = str(row['Адрес ПФ']).strip()
             if pd.isna(row['Адрес ПФ']) or pf_name == '':
@@ -766,11 +777,16 @@ class TechRefreshApp:
                 s_date = s.date()
                 e_date = e.date()
                 # Пропускаем проверку отсутствия для ФИО с 4+ записями
-                if df_dk.loc[idx, 'Is_FIO_Permanent']:
+                if row['Is_FIO_Permanent']:
                     continue  # Такие записи всегда считаются на рабочем месте
                 if (s_date <= check_end_date) and (e_date >= target_date):
                     add_log(idx, "ВК отсутствует")
         # ======================================
+
+        # Переносим накопленные в списках значения обратно в df_dk перед векторными
+        # операциями, которые читают эти столбцы (фильтр кандидатов по 'Log' и т.д.).
+        df_dk['Log'] = log_list
+        df_dk['Hours'] = hours_list
 
         self.log("Анализ отказников и избытка...")
         excess_by_pf = {}
@@ -850,15 +866,13 @@ class TechRefreshApp:
         date_col_replenishment = 'ЗНО на пополнение ПФ: дата исполнения'
         zno_col = 'ЗНО на пополнение ПФ'
         if date_col_replenishment in df_dk.columns and zno_col in df_dk.columns:
-            # Создаем словарь: номер ЗНО -> дата исполнения
-            for idx, row in df_dk.iterrows():
-                zno_num = str(row.get(zno_col, '')).strip() if pd.notna(row.get(zno_col, '')) else ''
-                if zno_num and zno_num != '-':
-                    zno_date = df_dk.loc[idx, date_col_replenishment]
-                    if pd.notna(zno_date):
-                        zno_date_parsed = pd.to_datetime(zno_date).replace(tzinfo=None)
-                        if hasattr(zno_date_parsed, 'date'):
-                            zno_replenishment_dates[zno_num] = zno_date_parsed.date()
+            # Создаем словарь: номер ЗНО -> дата исполнения (векторно, без df.loc по каждой строке)
+            for zno_val, zno_date in zip(df_dk[zno_col], df_dk[date_col_replenishment]):
+                zno_num = str(zno_val).strip() if pd.notna(zno_val) else ''
+                if zno_num and zno_num != '-' and pd.notna(zno_date):
+                    zno_date_parsed = pd.to_datetime(zno_date).replace(tzinfo=None)
+                    if hasattr(zno_date_parsed, 'date'):
+                        zno_replenishment_dates[zno_num] = zno_date_parsed.date()
 
         for idx, refused_row in refused_rows.iterrows():
             pf, tp = refused_row['Адрес ПФ'], refused_row['Тип']
@@ -981,15 +995,15 @@ class TechRefreshApp:
             pf_name = str(row['Адрес ПФ']).strip() if pd.notna(row['Адрес ПФ']) else 'N/A'
 
             # Пропускаем исключенные
-            if df_dk.loc[idx, 'Is_Excluded']:
+            if row['Is_Excluded']:
                 add_log(idx, f"Исключено: по периоду (ПФ: {pf_name})")
                 continue
             # Пропускаем с ошибками
-            if df_dk.loc[idx, 'Status'] == "Ошибка":
+            if status_list[idx] == "Ошибка":
                 add_log(idx, f"Ошибка в данных (ПФ: {pf_name})")
                 continue
             # Проверка отсутствия ВК (для обычных записей)
-            if "ВК отсутствует" in df_dk.loc[idx, 'Log']:
+            if "ВК отсутствует" in log_list[idx]:
                 add_log(idx, f"ВК отсутствует (ПФ: {pf_name})")
                 continue
 
@@ -1141,6 +1155,10 @@ class TechRefreshApp:
                 'comp': str_adj
             })
 
+        # Переносим финальные Log/Status обратно в df_dk для листов "Ошибки и Пропуски" и "Debug Log".
+        df_dk['Log'] = log_list
+        df_dk['Status'] = status_list
+
         total_zno_std = sum(d['count'] for d in stats_table)
         total_hours_std = sum(d['hours'] for d in stats_table)
         total_excess = sum(d['excess'] for d in stats_table)
@@ -1260,6 +1278,10 @@ class TechRefreshApp:
         current_count = 0
         selected_indices = []
 
+        # Ускорение: точечный доступ к Hours/Тип через dict вместо медленного pool.loc[idx, col]
+        hours_map = pool['Hours'].to_dict()
+        type_map = pool['Тип'].to_dict()
+
         total_rate_sum = 0.0
         total_items_for_rate = 0
 
@@ -1285,8 +1307,8 @@ class TechRefreshApp:
                         continue
 
                     cand_idx = q[0]
-                    std_h = pool.loc[cand_idx, 'Hours']
-                    cand_type = pool.loc[cand_idx, 'Тип']
+                    std_h = hours_map[cand_idx]
+                    cand_type = type_map[cand_idx]
                     if std_h == 0:
                         if add_log_func:
                             add_log_func(cand_idx, f"Пропущен (Вероятн): нулевые часы (ПФ: {pf_name})")
@@ -1358,8 +1380,8 @@ class TechRefreshApp:
                         continue
 
                     cand_idx = q[0]
-                    std_h = pool.loc[cand_idx, 'Hours']
-                    cand_type = pool.loc[cand_idx, 'Тип']
+                    std_h = hours_map[cand_idx]
+                    cand_type = type_map[cand_idx]
                     if std_h == 0:
                         if add_log_func:
                             add_log_func(cand_idx, f"Пропущен (Вероятн Монитор): нулевые часы (ПФ: {pf_name})")
@@ -1398,8 +1420,8 @@ class TechRefreshApp:
                         continue
 
                     cand_idx = q[0]
-                    std_h = pool.loc[cand_idx, 'Hours']
-                    cand_type = pool.loc[cand_idx, 'Тип']
+                    std_h = hours_map[cand_idx]
+                    cand_type = type_map[cand_idx]
                     if std_h == 0:
                         if add_log_func:
                             add_log_func(cand_idx, f"Пропущен (Вероятн Другое): нулевые часы (ПФ: {pf_name})")
@@ -1469,7 +1491,16 @@ class TechRefreshApp:
             
             # Вычисляем текущую дату для проверки избытка
             target_date = datetime.now().replace(tzinfo=None).date()
-            
+
+            # Ускорение: заранее строим индекс "нормализованный номер ЗНО на пополнение ПФ" ->
+            # ПЕРВЫЙ индекс строки. Раньше для каждой строки избытка выполнялось полное
+            # сканирование df (O(n^2) и трижды продублировано) — теперь это O(1)-поиск.
+            first_idx_by_zno = {}
+            if 'ЗНО на пополнение ПФ' in df.columns:
+                for _i, _v in df['ЗНО на пополнение ПФ'].astype(str).str.strip().items():
+                    if _v not in first_idx_by_zno:
+                        first_idx_by_zno[_v] = _i
+
             # Заголовок для главных показателей
             dashboard_ws[f'A{row}'] = '✅ Главные показатели'
             dashboard_ws[f'A{row}'].font = openpyxl.styles.Font(size=14, bold=True, color='26c6da')
@@ -1566,18 +1597,16 @@ class TechRefreshApp:
                         if len(zno_from_field) >= 13:
                             correct_zno = zno_from_field
                             # Ищем строку с этим ЗНО в столбце "ЗНО на пополнение ПФ"
-                            mask = (df['ЗНО на пополнение ПФ'].astype(str).str.strip() == correct_zno)
-                            if mask.any():
-                                matching_idx = df[mask].index[0]
+                            matching_idx = first_idx_by_zno.get(correct_zno)
+                            if matching_idx is not None:
                                 replenishment_date = df.loc[matching_idx, date_col_replenishment]
                         
                         # Приоритет 2: Проверяем ЗНО из Доп. параметр 2, если не нашли дату
                         if replenishment_date is None and len(zno_ref) >= 13:
                             correct_zno = zno_ref
                             # Ищем этот номер в столбце "ЗНО на пополнение ПФ"
-                            mask = (df['ЗНО на пополнение ПФ'].astype(str).str.strip() == correct_zno)
-                            if mask.any():
-                                matching_idx = df[mask].index[0]
+                            matching_idx = first_idx_by_zno.get(correct_zno)
+                            if matching_idx is not None:
                                 replenishment_date = df.loc[matching_idx, date_col_replenishment]
                                 
                                 # Если дата исполнения не найдена, проверяем дату создания
@@ -1634,18 +1663,10 @@ class TechRefreshApp:
             avg_days = round(df_closed_with_dates['days'].dropna().mean(), 1) if len(df_closed_with_dates['days'].dropna()) > 0 else 0
             
             # 6. Процент выполнения плана по активностям
-            df_with_domain = df[df['Домен'].notna() & (df['Домен'].astype(str).str.strip() != '') & (df['Домен'].astype(str).str.strip() != '-')].copy()
-            domain_plan = {}
-            for domains in df_with_domain['Домен']:
-                if pd.notna(domains):
-                    for d in str(domains).split(','):
-                        domain = d.strip()
-                        if domain:
-                            domain_plan[domain] = domain_plan.get(domain, {'total': 0, 'completed': 0})
-                            domain_plan[domain]['total'] += 1
-                            if pd.notna(df_with_domain.loc[df_with_domain['Домен'].astype(str).str.contains(domain, na=False), 'ЗНО на Техрефреш'].values[0]):
-                                domain_plan[domain]['completed'] += 1
-            
+            # (Прежний O(n^2)-расчёт domain_plan здесь удалён: он каждую строку искал
+            #  .str.contains(domain) по всему df и при этом полностью перезаписывался
+            #  ниже корректной и быстрой версией. В метриках используется только '-'.)
+
             # Записываем главные показатели
             metrics = [
                 ('1. ЗНО в работе (статус "В работе")', zno_inwork, 'Количество ЗНО с текущим статусом "В работе"'),
@@ -2175,18 +2196,16 @@ class TechRefreshApp:
                         if len(zno_from_field) >= 13:
                             correct_zno = zno_from_field
                             # Ищем строку с этим ЗНО в столбце "ЗНО на пополнение ПФ"
-                            mask = (df['ЗНО на пополнение ПФ'].astype(str).str.strip() == correct_zno)
-                            if mask.any():
-                                matching_idx = df[mask].index[0]
+                            matching_idx = first_idx_by_zno.get(correct_zno)
+                            if matching_idx is not None:
                                 replenishment_date = df.loc[matching_idx, date_col_replenishment]
                         
                         # Приоритет 2: Проверяем ЗНО из Доп. параметр 2, если не нашли дату
                         if replenishment_date is None and len(zno_ref) >= 13:
                             correct_zno = zno_ref
                             # Ищем этот номер в столбце "ЗНО на пополнение ПФ"
-                            mask = (df['ЗНО на пополнение ПФ'].astype(str).str.strip() == correct_zno)
-                            if mask.any():
-                                matching_idx = df[mask].index[0]
+                            matching_idx = first_idx_by_zno.get(correct_zno)
+                            if matching_idx is not None:
                                 replenishment_date = df.loc[matching_idx, date_col_replenishment]
                                 
                                 # Если дата исполнения не найдена, проверяем дату создания
@@ -2283,18 +2302,16 @@ class TechRefreshApp:
                         if len(zno_from_field) >= 13:
                             correct_zno = zno_from_field
                             # Ищем строку с этим ЗНО в столбце "ЗНО на пополнение ПФ"
-                            mask = (df['ЗНО на пополнение ПФ'].astype(str).str.strip() == correct_zno)
-                            if mask.any():
-                                matching_idx = df[mask].index[0]
+                            matching_idx = first_idx_by_zno.get(correct_zno)
+                            if matching_idx is not None:
                                 replenishment_date = df.loc[matching_idx, date_col_replenishment]
                         
                         # Приоритет 2: Проверяем ЗНО из Доп. параметр 2, если не нашли дату
                         if replenishment_date is None and len(zno_ref) >= 13:
                             correct_zno = zno_ref
                             # Ищем этот номер в столбце "ЗНО на пополнение ПФ"
-                            mask = (df['ЗНО на пополнение ПФ'].astype(str).str.strip() == correct_zno)
-                            if mask.any():
-                                matching_idx = df[mask].index[0]
+                            matching_idx = first_idx_by_zno.get(correct_zno)
+                            if matching_idx is not None:
                                 replenishment_date = df.loc[matching_idx, date_col_replenishment]
                                 
                                 # Если дата исполнения не найдена, проверяем дату создания
