@@ -134,6 +134,11 @@ class TechRefreshApp:
         self.gen_plan = tk.BooleanVar(value=False)
         self.gen_dashboard = tk.BooleanVar(value=False)
         self.gen_excess = tk.BooleanVar(value=False)
+        # trace на самих переменных — надёжнее, чем command= у ttk.Checkbutton:
+        # срабатывает при любом изменении значения независимо от особенностей темы
+        # (на Windows command иногда не доводит переменную до True с первого клика).
+        for _v in (self.gen_plan, self.gen_dashboard, self.gen_excess):
+            _v.trace_add('write', lambda *a: self._update_run_button())
         for _var, _lbl in ((self.gen_plan, "План ЗНО"),
                            (self.gen_dashboard, "Дашборд"),
                            (self.gen_excess, "Избыток")):
@@ -283,10 +288,13 @@ class TechRefreshApp:
         return cv
 
     def _update_run_button(self):
-        """Показывает кнопку запуска только если выбран хотя бы один лист."""
+        """Показывает кнопку запуска только если выбран хотя бы один лист.
+
+        Без проверки winfo_ismapped (на Windows она бывает недостоверной):
+        pack()/pack_forget() идемпотентны — повторный вызов безопасен.
+        """
         if self.gen_plan.get() or self.gen_dashboard.get() or self.gen_excess.get():
-            if not self.btn_select.winfo_ismapped():
-                self.btn_select.pack(pady=(10, 6), before=self.progress)
+            self.btn_select.pack(pady=(10, 6), before=self.progress)
         else:
             self.btn_select.pack_forget()
 
