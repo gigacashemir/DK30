@@ -3,6 +3,7 @@ import numpy as np
 import os
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+import tkinter.font as tkfont
 from datetime import datetime, timedelta
 import warnings
 import traceback
@@ -54,224 +55,291 @@ FAILED_TIME_HOURS = 0.084
 class TechRefreshApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Автоматизация Техрефреша Pro v9.15 (Priority Support)")
+        self.root.title("Умный планировщик Техрефреша Pro v9.15")
         self.root.geometry("1400x950")
+        self.root.minsize(1120, 760)
 
-        # Цветовая схема
+        # === Палитра «frosted glass» (светлая, воздушная) ===
         self.colors = {
-            'bg_main': '#f8f9fa',
-            'header': '#4a90e2',
-            'header_text': '#ffffff',
-            'panel': '#ffffff',
-            'accent': '#27ae60',
-            'accent_hover': '#219a52',
-            'warning': '#f39c12',
-            'danger': '#e74c3c',
-            'info': '#3498db',
-            'text_primary': '#2c3e50',
-            'text_secondary': '#7f8c8d',
-            'border': '#e9ecef',
-            'row_alt': '#f1f3f5'
+            'bg_main':        '#eaf0fb',
+            'grad_top':       '#6e8bf5',
+            'grad_bot':       '#9aa7f7',
+            'header_text':    '#ffffff',
+            'header_sub':     '#e8edff',
+            'card':           '#ffffff',
+            'card_border':    '#e2e8f5',
+            'panel':          '#ffffff',
+            'accent':         '#5b8def',
+            'accent_hover':   '#3f74e0',
+            'accent2':        '#19b9a6',
+            'success':        '#22c55e',
+            'warning':        '#f59e0b',
+            'danger':         '#ef4444',
+            'text_primary':   '#1f2a44',
+            'text_secondary': '#6b7a99',
+            'border':         '#e2e8f5',
+            'row_alt':        '#f4f7fd',
+            'tree_sel':       '#dbe7ff',
+            'tab_bg':         '#dde6f6',
         }
 
         self.root.configure(bg=self.colors['bg_main'])
-
-        # Стили ttk
-        self.style = ttk.Style()
-        self.style.theme_use('clam')
-        
-        # Настройка стилей для более современного вида
-        self.style.configure("TNotebook", background=self.colors['bg_main'], tabmargins=[10, 5])
-        self.style.configure("TNotebook.Tab", 
-                            background=self.colors['panel'],
-                            foreground=self.colors['text_primary'],
-                            padding=[15, 10],
-                            font=('Segoe UI', 11, 'bold'))
-        self.style.map("TNotebook.Tab",
-                      background=[('selected', self.colors['accent'])],
-                      foreground=[('selected', self.colors['header_text'])])
-        
-        self.style.configure("Treeview", 
-                            font=('Segoe UI', 10),
-                            rowheight=30,
-                            background=self.colors['panel'],
-                            fieldbackground=self.colors['panel'])
-        self.style.map('Treeview', 
-                      background=[('selected', self.colors['accent'])],
-                      foreground=[('selected', self.colors['header_text'])])
-        
-        self.style.configure("Treeview.Heading", 
-                            font=('Segoe UI', 11, 'bold'),
-                            background=self.colors['accent'],
-                            foreground=self.colors['header_text'],
-                            padding=[5, 10])
-        
-        self.style.configure("TLabel", background=self.colors['bg_main'], foreground=self.colors['text_primary'])
-        self.style.configure("TFrame", background=self.colors['bg_main'])
+        try:
+            self.root.attributes('-alpha', 0.985)  # лёгкая полупрозрачность окна (Win/macOS)
+        except Exception:
+            pass
 
         self.df_result = None
         self.plan_data_store = []
         self.fail_data_store = []
         self.adjusted_plan_data_store = []
 
-        # Header - современный дизайн
-        header = tk.Frame(root, bg=self.colors['header'], height=80, bd=0, relief='flat')
-        header.pack(fill="x", side="top", pady=(0, 10))
-        
-        title_frame = tk.Frame(header, bg=self.colors['header'])
-        title_frame.pack(pady=20)
-        
-        # Иконка заголовка
-        lbl_icon = tk.Label(title_frame, text="⚙️", font=('Segoe UI', 24), bg=self.colors['header'], fg=self.colors['header_text'])
-        lbl_icon.pack(side='left', padx=(20, 10))
-        
-        lbl_title = tk.Label(title_frame, text="Умный планировщик Техрефреша", 
-                            font=('Segoe UI', 20, 'bold'), 
-                            bg=self.colors['header'], 
-                            fg=self.colors['header_text'])
-        lbl_title.pack(side='left')
+        self._setup_styles()
 
-        # === БЛОК ВЫБОРА ДАТЫ ===
-        date_frame = tk.Frame(root, bg=self.colors['panel'], bd=1, relief='flat')
-        date_frame.pack(pady=10, padx=20, fill="x")
-        
-        date_inner = tk.Frame(date_frame, bg=self.colors['panel'])
-        date_inner.pack(pady=15, padx=20)
+        # === ШАПКА с градиентом (Canvas) ===
+        self.header_canvas = tk.Canvas(root, height=92, bg=self.colors['bg_main'],
+                                       highlightthickness=0, bd=0)
+        self.header_canvas.pack(fill='x', side='top')
+        self.header_canvas.bind('<Configure>', self._redraw_header)
 
-        lbl_date = tk.Label(date_inner, text="📅 Дата для расчета плана:", 
-                           font=('Segoe UI', 11, 'bold'), 
-                           bg=self.colors['panel'], 
-                           fg=self.colors['text_primary'])
-        lbl_date.pack(side="left", padx=(0, 20))
+        # === Карточка выбора даты ===
+        date_outer, date_card = self._soft_card(root)
+        date_outer.pack(pady=(14, 6), padx=24, fill='x')
+        date_inner = tk.Frame(date_card, bg=self.colors['card'])
+        date_inner.pack(pady=14, padx=20, fill='x')
+
+        tk.Label(date_inner, text="📅  Дата для расчёта плана", font=('Segoe UI', 12, 'bold'),
+                 bg=self.colors['card'], fg=self.colors['text_primary']).pack(side='left', padx=(0, 22))
 
         self.date_choice = tk.StringVar(value="today")
-
-        rb_today = ttk.Radiobutton(date_inner, text="Сегодня", variable=self.date_choice, value="today")
-        rb_today.pack(side="left", padx=10)
-
-        rb_tomorrow = ttk.Radiobutton(date_inner, text="Завтра", variable=self.date_choice, value="tomorrow")
-        rb_tomorrow.pack(side="left", padx=10)
+        ttk.Radiobutton(date_inner, text="Сегодня", variable=self.date_choice,
+                        value="today", style='Glass.TRadiobutton').pack(side='left', padx=(0, 14))
+        ttk.Radiobutton(date_inner, text="Завтра", variable=self.date_choice,
+                        value="tomorrow", style='Glass.TRadiobutton').pack(side='left', padx=(0, 14))
 
         today_str = datetime.now().strftime("%d.%m.%Y")
         tomorrow_str = (datetime.now() + timedelta(days=1)).strftime("%d.%m.%Y")
-        lbl_hint = tk.Label(date_inner, text=f"(Сегодня: {today_str} | Завтра: {tomorrow_str})",
-                            font=('Segoe UI', 10), 
-                            bg=self.colors['panel'], 
-                            fg=self.colors['text_secondary'])
-        lbl_hint.pack(side="left", padx=(20, 0))
+        tk.Label(date_inner, text=f"Сегодня: {today_str}     •     Завтра: {tomorrow_str}",
+                 font=('Segoe UI', 10), bg=self.colors['card'],
+                 fg=self.colors['text_secondary']).pack(side='left', padx=(18, 0))
 
-        # Кнопка запуска с современным дизайном
-        self.btn_select = tk.Button(root, 
-                                   text="📁 ВЫБРАТЬ ПАПКУ И ЗАПУСТИТЬ РАСЧЕТ", 
-                                   command=self.process_files,
-                                   font=("Segoe UI", 12, "bold"), 
-                                   bg=self.colors['accent'], 
-                                   fg="white", 
-                                   bd=0, 
-                                   cursor="hand2",
-                                   activebackground=self.colors['accent_hover'],
-                                   activeforeground="white",
-                                   relief='flat',
-                                   padx=30, 
-                                   pady=12)
-        self.btn_select.pack(pady=15, ipadx=30, ipady=12)
+        # === Кнопка запуска (скруглённая, с hover) ===
+        self.btn_select = self._make_round_button(
+            root, "📁    ВЫБРАТЬ ПАПКУ И ЗАПУСТИТЬ РАСЧЁТ", self.process_files,
+            bg=self.colors['accent'], hover=self.colors['accent_hover'])
+        self.btn_select.pack(pady=(10, 6))
 
-        # Прогресс бар
-        self.progress = ttk.Progressbar(root, orient="horizontal", length=500, mode="determinate")
-        self.progress.pack(pady=10, padx=20)
+        # === Прогресс-бар ===
+        self.progress = ttk.Progressbar(root, orient="horizontal", length=560,
+                                        mode="determinate", style='Glass.Horizontal.TProgressbar')
+        self.progress.pack(pady=(4, 10), padx=24)
 
-        # Tabs с современным дизайном
+        # === Вкладки ===
         self.notebook = ttk.Notebook(root)
-        self.notebook.pack(expand=True, fill="both", padx=20, pady=10)
+        self.notebook.pack(expand=True, fill="both", padx=24, pady=(0, 16))
 
         self.tab_plan = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_plan, text="📊 План (Стандарт)")
+        self.notebook.add(self.tab_plan, text="   📊  План (Стандарт)   ")
         self.create_plan_tab()
 
         self.tab_adjusted = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_adjusted, text="🚀 План (Вероятностный)")
+        self.notebook.add(self.tab_adjusted, text="   🚀  План (Вероятностный)   ")
         self.create_adjusted_tab()
 
         self.tab_failures = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_failures, text="📉 Аналитика отказов")
+        self.notebook.add(self.tab_failures, text="   📉  Аналитика отказов   ")
         self.create_failures_tab()
+
+    # === ОФОРМЛЕНИЕ (frosted-glass) ===
+    def _setup_styles(self):
+        style = ttk.Style()
+        try:
+            style.theme_use('clam')
+        except Exception:
+            pass
+        c = self.colors
+        style.configure('TFrame', background=c['bg_main'])
+        style.configure('TLabel', background=c['bg_main'], foreground=c['text_primary'])
+
+        # Вкладки — плоские «пилюли»
+        style.configure('TNotebook', background=c['bg_main'], borderwidth=0,
+                        tabmargins=[6, 6, 6, 0])
+        style.configure('TNotebook.Tab', background=c['tab_bg'], foreground=c['text_secondary'],
+                        padding=[18, 11], font=('Segoe UI', 11, 'bold'), borderwidth=0)
+        style.map('TNotebook.Tab',
+                  background=[('selected', c['card']), ('active', '#e9eefb')],
+                  foreground=[('selected', c['accent']), ('active', c['text_primary'])])
+
+        # Таблицы
+        style.configure('Treeview', background=c['card'], fieldbackground=c['card'],
+                        foreground=c['text_primary'], rowheight=32, font=('Segoe UI', 10),
+                        borderwidth=0)
+        style.map('Treeview',
+                  background=[('selected', c['tree_sel'])],
+                  foreground=[('selected', c['text_primary'])])
+        style.configure('Treeview.Heading', background=c['accent'], foreground='#ffffff',
+                        font=('Segoe UI', 10, 'bold'), padding=[8, 9], borderwidth=0, relief='flat')
+        style.map('Treeview.Heading', background=[('active', c['accent_hover'])])
+
+        # Радиокнопки на карточке
+        style.configure('Glass.TRadiobutton', background=c['card'], foreground=c['text_primary'],
+                        font=('Segoe UI', 11))
+        style.map('Glass.TRadiobutton',
+                  foreground=[('active', c['accent']), ('selected', c['accent'])],
+                  background=[('active', c['card'])])
+
+        # Прогресс-бар (тонкий, акцентный)
+        style.configure('Glass.Horizontal.TProgressbar', troughcolor=c['row_alt'],
+                        background=c['accent'], thickness=10, borderwidth=0)
+
+        # Скроллбары (тонкие)
+        for orient in ('Vertical', 'Horizontal'):
+            style.configure(orient + '.TScrollbar', background=c['tab_bg'],
+                            troughcolor=c['bg_main'], borderwidth=0, arrowsize=13)
+            style.map(orient + '.TScrollbar', background=[('active', c['accent'])])
+
+    def _lerp_color(self, c1, c2, t):
+        c1 = c1.lstrip('#'); c2 = c2.lstrip('#')
+        r1, g1, b1 = int(c1[0:2], 16), int(c1[2:4], 16), int(c1[4:6], 16)
+        r2, g2, b2 = int(c2[0:2], 16), int(c2[2:4], 16), int(c2[4:6], 16)
+        r = int(r1 + (r2 - r1) * t); g = int(g1 + (g2 - g1) * t); b = int(b1 + (b2 - b1) * t)
+        return '#%02x%02x%02x' % (r, g, b)
+
+    def _round_rect(self, canvas, x1, y1, x2, y2, r, **kw):
+        pts = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
+               x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
+               x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
+        return canvas.create_polygon(pts, smooth=True, **kw)
+
+    def _redraw_header(self, event=None):
+        cv = self.header_canvas
+        cv.delete('all')
+        w = cv.winfo_width() or self.root.winfo_width()
+        h = int(cv['height'])
+        steps = max(2, h)
+        for i in range(steps):
+            cv.create_line(0, i, w, i,
+                           fill=self._lerp_color(self.colors['grad_top'], self.colors['grad_bot'],
+                                                 i / (steps - 1)))
+        cv.create_text(32, h // 2 - 12, anchor='w', text='⚙   Умный планировщик Техрефреша',
+                       fill=self.colors['header_text'], font=('Segoe UI', 21, 'bold'))
+        cv.create_text(35, h // 2 + 16, anchor='w',
+                       text='Автоматизация техрефреша  •  Pro v9.15',
+                       fill=self.colors['header_sub'], font=('Segoe UI', 10))
+
+    def _soft_card(self, parent):
+        """Плоская «карточка» со светлой заливкой и тонкой обводкой (имитация стекла)."""
+        outer = tk.Frame(parent, bg=self.colors['card_border'])
+        inner = tk.Frame(outer, bg=self.colors['card'])
+        inner.pack(fill='both', expand=True, padx=1, pady=1)
+        return outer, inner
+
+    def _make_round_button(self, parent, text, command, bg=None, fg='#ffffff', hover=None,
+                           font=('Segoe UI', 12, 'bold'), padx=28, pady=14, radius=18):
+        bg = bg or self.colors['accent']
+        hover = hover or self.colors['accent_hover']
+        f = tkfont.Font(root=self.root, family=font[0], size=font[1],
+                        weight=(font[2] if len(font) > 2 else 'normal'))
+        w = f.measure(text) + 2 * padx
+        h = f.metrics('linespace') + 2 * pady
+        try:
+            pbg = parent['bg']
+        except Exception:
+            pbg = self.colors['bg_main']
+        cv = tk.Canvas(parent, width=w, height=h, bg=pbg, highlightthickness=0, bd=0, cursor='hand2')
+        rect = self._round_rect(cv, 2, 2, w - 2, h - 2, radius, fill=bg, outline=bg)
+        cv.create_text(w // 2, h // 2, text=text, fill=fg, font=font)
+        cv.bind('<Enter>', lambda e: cv.itemconfig(rect, fill=hover, outline=hover))
+        cv.bind('<Leave>', lambda e: cv.itemconfig(rect, fill=bg, outline=bg))
+        cv.bind('<Button-1>', lambda e: command())
+        return cv
 
     # === МЕТОДЫ ИНТЕРФЕЙСА ===
     def create_plan_tab(self):
-        search_frame = tk.Frame(self.tab_plan, bg=self.colors['panel'], bd=1, relief='flat')
-        search_frame.pack(fill="x", padx=10, pady=10)
-        
-        search_inner = tk.Frame(search_frame, bg=self.colors['panel'])
-        search_inner.pack(pady=10, padx=10)
-        
-        lbl_search = tk.Label(search_inner, text="🔍 Поиск по ПФ:", font=('Segoe UI', 10, 'bold'), bg=self.colors['panel'], fg=self.colors['text_primary'])
-        lbl_search.pack(side="left", padx=(0, 10))
-        
-        self.entry_search_plan = tk.Entry(search_inner, width=35, font=('Segoe UI', 10), bd=1, relief='flat', highlightthickness=1, highlightbackground=self.colors['border'], highlightcolor=self.colors['accent'])
-        self.entry_search_plan.pack(side="left", padx=10)
+        c = self.colors
+        wrap = tk.Frame(self.tab_plan, bg=c['bg_main'])
+        wrap.pack(fill='both', expand=True, padx=14, pady=14)
+
+        # Панель поиска + итоги (карточка)
+        top_outer, top_card = self._soft_card(wrap)
+        top_outer.pack(fill='x', pady=(0, 12))
+        top = tk.Frame(top_card, bg=c['card'])
+        top.pack(fill='x', padx=16, pady=12)
+
+        tk.Label(top, text="🔍  Поиск по ПФ", font=('Segoe UI', 10, 'bold'),
+                 bg=c['card'], fg=c['text_primary']).pack(side='left', padx=(0, 10))
+        self.entry_search_plan = tk.Entry(top, width=32, font=('Segoe UI', 10), bd=0, relief='flat',
+                                          highlightthickness=1, highlightbackground=c['border'],
+                                          highlightcolor=c['accent'], bg='#ffffff',
+                                          fg=c['text_primary'], insertbackground=c['accent'])
+        self.entry_search_plan.pack(side='left', ipady=5, padx=(0, 8))
         self.entry_search_plan.bind('<KeyRelease>', self.search_plan)
 
-        total_frame = tk.Frame(self.tab_plan, bg=self.colors['panel'], height=40, bd=1, relief='flat')
-        total_frame.pack(fill="x", padx=10, pady=(0, 5))
-        
-        total_inner = tk.Frame(total_frame, bg=self.colors['panel'])
-        total_inner.pack(pady=8, padx=15)
-        
-        self.lbl_total_plan = tk.Label(total_inner, text="ИТОГО: ЗНО: 0 | Часов: 0.0 | Избыток: 0",
-                                       font=('Segoe UI', 12, 'bold'), bg=self.colors['panel'], fg=self.colors['accent'])
-        self.lbl_total_plan.pack(side="left", padx=10, pady=2)
+        self.lbl_total_plan = tk.Label(top, text="ИТОГО: ЗНО: 0 | Часов: 0.0 | Избыток: 0",
+                                       font=('Segoe UI', 12, 'bold'), bg=c['card'], fg=c['accent'])
+        self.lbl_total_plan.pack(side='right', padx=(10, 4))
+
+        # Таблица (карточка)
+        tbl_outer, tbl_card = self._soft_card(wrap)
+        tbl_outer.pack(fill='both', expand=True)
+        tbl = tk.Frame(tbl_card, bg=c['card'])
+        tbl.pack(fill='both', expand=True, padx=4, pady=4)
 
         cols = ("pf", "count", "hours", "excess", "comp_all", "comp_plan")
-        self.tree_plan = ttk.Treeview(self.tab_plan, columns=cols, show="headings", height=25)
+        self.tree_plan = ttk.Treeview(tbl, columns=cols, show="headings", height=25)
         self.tree_plan.heading("pf", text="ПФ")
         self.tree_plan.heading("count", text="Всего ЗНО")
         self.tree_plan.heading("hours", text="Часов")
-        self.tree_plan.heading("excess", text="⚠️ Избыток")
+        self.tree_plan.heading("excess", text="⚠ Избыток")
         self.tree_plan.heading("comp_all", text="Состав (Все)")
         self.tree_plan.heading("comp_plan", text="Состав (План)")
         self.tree_plan.column("pf", width=120, anchor='center')
-        self.tree_plan.column("count", width=80, anchor='center')
+        self.tree_plan.column("count", width=90, anchor='center')
         self.tree_plan.column("hours", width=80, anchor='center')
-        self.tree_plan.column("excess", width=80, anchor='center')
+        self.tree_plan.column("excess", width=90, anchor='center')
         self.tree_plan.column("comp_all", width=300)
         self.tree_plan.column("comp_plan", width=300)
-        scroll = ttk.Scrollbar(self.tab_plan, orient="vertical", command=self.tree_plan.yview)
+        self.tree_plan.tag_configure('oddrow', background=c['card'])
+        self.tree_plan.tag_configure('evenrow', background=c['row_alt'])
+        scroll = ttk.Scrollbar(tbl, orient="vertical", command=self.tree_plan.yview)
         self.tree_plan.configure(yscrollcommand=scroll.set)
-        self.tree_plan.pack(side="left", fill="both", expand=True, padx=10, pady=5)
+        self.tree_plan.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
 
     def create_adjusted_tab(self):
-        info_frame = tk.Frame(self.tab_adjusted, bg=self.colors['panel'], bd=1, relief='flat')
-        info_frame.pack(fill="x", padx=10, pady=10)
-        info_inner = tk.Frame(info_frame, bg=self.colors['panel'])
-        info_inner.pack(pady=10, padx=15)
-        lbl_info = tk.Label(info_inner, text="ℹ️ Кандидаты: ПФ не пополнен, нет ЗНО, нет ЗНО на пополнение, ВК на месте.",
-                            font=('Segoe UI', 10, 'bold'), bg=self.colors['panel'], fg=self.colors['accent'], anchor="w")
-        lbl_info.pack(fill="x", padx=5)
+        c = self.colors
+        wrap = tk.Frame(self.tab_adjusted, bg=c['bg_main'])
+        wrap.pack(fill='both', expand=True, padx=14, pady=14)
 
-        search_frame = tk.Frame(self.tab_adjusted, bg=self.colors['panel'], bd=1, relief='flat')
-        search_frame.pack(fill="x", padx=10, pady=5)
-        search_inner = tk.Frame(search_frame, bg=self.colors['panel'])
-        search_inner.pack(pady=10, padx=10)
-        
-        lbl_search = tk.Label(search_inner, text="🔍 Поиск по ПФ:", font=('Segoe UI', 10, 'bold'), bg=self.colors['panel'], fg=self.colors['text_primary'])
-        lbl_search.pack(side="left", padx=(0, 10))
-        
-        self.entry_search_adj = tk.Entry(search_inner, width=35, font=('Segoe UI', 10), bd=1, relief='flat', highlightthickness=1, highlightbackground=self.colors['border'], highlightcolor=self.colors['accent'])
-        self.entry_search_adj.pack(side="left", padx=10)
+        info_outer, info_card = self._soft_card(wrap)
+        info_outer.pack(fill='x', pady=(0, 10))
+        tk.Label(info_card,
+                 text="ℹ  Кандидаты: ПФ не пополнен, нет ЗНО, нет ЗНО на пополнение, ВК на месте.",
+                 font=('Segoe UI', 10, 'bold'), bg=c['card'], fg=c['accent2'],
+                 anchor='w', justify='left').pack(fill='x', padx=16, pady=10)
+
+        top_outer, top_card = self._soft_card(wrap)
+        top_outer.pack(fill='x', pady=(0, 12))
+        top = tk.Frame(top_card, bg=c['card'])
+        top.pack(fill='x', padx=16, pady=12)
+        tk.Label(top, text="🔍  Поиск по ПФ", font=('Segoe UI', 10, 'bold'),
+                 bg=c['card'], fg=c['text_primary']).pack(side='left', padx=(0, 10))
+        self.entry_search_adj = tk.Entry(top, width=32, font=('Segoe UI', 10), bd=0, relief='flat',
+                                         highlightthickness=1, highlightbackground=c['border'],
+                                         highlightcolor=c['accent'], bg='#ffffff',
+                                         fg=c['text_primary'], insertbackground=c['accent'])
+        self.entry_search_adj.pack(side='left', ipady=5, padx=(0, 8))
         self.entry_search_adj.bind('<KeyRelease>', self.search_adjusted)
+        self.lbl_total_adj = tk.Label(top, text="ИТОГО: ЗНО: 0 | Станд.Часов: 0.0 | Эфф.Часов: 0.0",
+                                      font=('Segoe UI', 12, 'bold'), bg=c['card'], fg=c['accent'])
+        self.lbl_total_adj.pack(side='right', padx=(10, 4))
 
-        total_frame = tk.Frame(self.tab_adjusted, bg=self.colors['panel'], height=40, bd=1, relief='flat')
-        total_frame.pack(fill="x", padx=10, pady=(0, 5))
-        total_inner = tk.Frame(total_frame, bg=self.colors['panel'])
-        total_inner.pack(pady=8, padx=15)
-        
-        self.lbl_total_adj = tk.Label(total_inner, text="ИТОГО: ЗНО: 0 | Станд.Часов: 0.0 | Эфф.Часов: 0.0",
-                                      font=('Segoe UI', 12, 'bold'), bg=self.colors['panel'], fg=self.colors['accent'])
-        self.lbl_total_adj.pack(side="left", padx=10, pady=2)
-
+        tbl_outer, tbl_card = self._soft_card(wrap)
+        tbl_outer.pack(fill='both', expand=True)
+        tbl = tk.Frame(tbl_card, bg=c['card'])
+        tbl.pack(fill='both', expand=True, padx=4, pady=4)
         cols = ("pf", "count", "hours_std", "hours_eff", "fail_rate_used", "comp")
-        self.tree_adj = ttk.Treeview(self.tab_adjusted, columns=cols, show="headings", height=25)
+        self.tree_adj = ttk.Treeview(tbl, columns=cols, show="headings", height=25)
         self.tree_adj.heading("pf", text="ПФ")
         self.tree_adj.heading("count", text="Кол-во ЗНО")
         self.tree_adj.heading("hours_std", text="Станд. Часы")
@@ -279,71 +347,91 @@ class TechRefreshApp:
         self.tree_adj.heading("fail_rate_used", text="Ср. % Отказов")
         self.tree_adj.heading("comp", text="Состав")
         self.tree_adj.column("pf", width=120, anchor='center')
-        self.tree_adj.column("count", width=80, anchor='center')
+        self.tree_adj.column("count", width=90, anchor='center')
         self.tree_adj.column("hours_std", width=100, anchor='center')
         self.tree_adj.column("hours_eff", width=100, anchor='center')
         self.tree_adj.column("fail_rate_used", width=120, anchor='center')
         self.tree_adj.column("comp", width=300)
-
-        scroll = ttk.Scrollbar(self.tab_adjusted, orient="vertical", command=self.tree_adj.yview)
+        self.tree_adj.tag_configure('oddrow', background=c['card'])
+        self.tree_adj.tag_configure('evenrow', background=c['row_alt'])
+        scroll = ttk.Scrollbar(tbl, orient="vertical", command=self.tree_adj.yview)
         self.tree_adj.configure(yscrollcommand=scroll.set)
-        self.tree_adj.pack(side="left", fill="both", expand=True, padx=10, pady=5)
+        self.tree_adj.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
 
     def create_failures_tab(self):
-        search_frame = tk.Frame(self.tab_failures, bg=self.colors['panel'], bd=1, relief='flat')
-        search_frame.pack(fill="x", padx=10, pady=10)
-        search_inner = tk.Frame(search_frame, bg=self.colors['panel'])
-        search_inner.pack(pady=10, padx=10)
-        
-        lbl_search = tk.Label(search_inner, text="🔍 Поиск по ПФ:", font=('Segoe UI', 10, 'bold'), bg=self.colors['panel'], fg=self.colors['text_primary'])
-        lbl_search.pack(side="left", padx=(0, 10))
-        
-        self.entry_search_fail = tk.Entry(search_inner, width=35, font=('Segoe UI', 10), bd=1, relief='flat', highlightthickness=1, highlightbackground=self.colors['border'], highlightcolor=self.colors['accent'])
-        self.entry_search_fail.pack(side="left", padx=10)
+        c = self.colors
+        wrap = tk.Frame(self.tab_failures, bg=c['bg_main'])
+        wrap.pack(fill='both', expand=True, padx=14, pady=14)
+
+        top_outer, top_card = self._soft_card(wrap)
+        top_outer.pack(fill='x', pady=(0, 12))
+        top = tk.Frame(top_card, bg=c['card'])
+        top.pack(fill='x', padx=16, pady=12)
+        tk.Label(top, text="🔍  Поиск по ПФ / типу", font=('Segoe UI', 10, 'bold'),
+                 bg=c['card'], fg=c['text_primary']).pack(side='left', padx=(0, 10))
+        self.entry_search_fail = tk.Entry(top, width=32, font=('Segoe UI', 10), bd=0, relief='flat',
+                                          highlightthickness=1, highlightbackground=c['border'],
+                                          highlightcolor=c['accent'], bg='#ffffff',
+                                          fg=c['text_primary'], insertbackground=c['accent'])
+        self.entry_search_fail.pack(side='left', ipady=5, padx=(0, 8))
         self.entry_search_fail.bind('<KeyRelease>', self.search_failures)
 
+        tbl_outer, tbl_card = self._soft_card(wrap)
+        tbl_outer.pack(fill='both', expand=True)
+        tbl = tk.Frame(tbl_card, bg=c['card'])
+        tbl.pack(fill='both', expand=True, padx=4, pady=4)
         cols = ("pf", "type", "total_zno", "failed_zno", "fail_rate")
-        self.tree_fail = ttk.Treeview(self.tab_failures, columns=cols, show="headings", height=25)
+        self.tree_fail = ttk.Treeview(tbl, columns=cols, show="headings", height=25)
         self.tree_fail.heading("pf", text="ПФ")
         self.tree_fail.heading("type", text="Тип оборудования")
         self.tree_fail.heading("total_zno", text="Всего закрыто ЗНО")
         self.tree_fail.heading("failed_zno", text="Неудачных ЗНО")
         self.tree_fail.heading("fail_rate", text="% Отказов")
         self.tree_fail.column("pf", width=120, anchor='center')
-        self.tree_fail.column("type", width=200)
+        self.tree_fail.column("type", width=220)
         self.tree_fail.column("total_zno", width=150, anchor='center')
         self.tree_fail.column("failed_zno", width=150, anchor='center')
-        self.tree_fail.column("fail_rate", width=100, anchor='center')
-        
-        scroll = ttk.Scrollbar(self.tab_failures, orient="vertical", command=self.tree_fail.yview)
+        self.tree_fail.column("fail_rate", width=110, anchor='center')
+        self.tree_fail.tag_configure('oddrow', background=c['card'])
+        self.tree_fail.tag_configure('evenrow', background=c['row_alt'])
+        scroll = ttk.Scrollbar(tbl, orient="vertical", command=self.tree_fail.yview)
         self.tree_fail.configure(yscrollcommand=scroll.set)
-        self.tree_fail.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+        self.tree_fail.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
 
     def search_plan(self, event=None):
         query = self.entry_search_plan.get().lower().strip()
         for item in self.tree_plan.get_children():
             self.tree_plan.delete(item)
+        r = 0
         for s in self.plan_data_store:
             if query in str(s['pf']).lower():
-                self.tree_plan.insert("", "end", values=(s['pf'], s['count'], s['hours'], s['excess'], s['comp_all'], s['comp_plan']))
+                tag = 'oddrow' if r % 2 == 0 else 'evenrow'
+                self.tree_plan.insert("", "end", values=(s['pf'], s['count'], s['hours'], s['excess'], s['comp_all'], s['comp_plan']), tags=(tag,))
+                r += 1
 
     def search_adjusted(self, event=None):
         query = self.entry_search_adj.get().lower().strip()
         for item in self.tree_adj.get_children():
             self.tree_adj.delete(item)
+        r = 0
         for s in self.adjusted_plan_data_store:
             if query in str(s['pf']).lower():
-                self.tree_adj.insert("", "end", values=(s['pf'], s['count'], s['hours_std'], s['hours_eff'], s['fail_rate_used'], s['comp']))
+                tag = 'oddrow' if r % 2 == 0 else 'evenrow'
+                self.tree_adj.insert("", "end", values=(s['pf'], s['count'], s['hours_std'], s['hours_eff'], s['fail_rate_used'], s['comp']), tags=(tag,))
+                r += 1
 
     def search_failures(self, event=None):
         query = self.entry_search_fail.get().lower().strip()
         for item in self.tree_fail.get_children():
             self.tree_fail.delete(item)
+        r = 0
         for f in self.fail_data_store:
             if query in str(f['pf']).lower() or query in str(f['type']).lower():
-                self.tree_fail.insert("", "end", values=(f['pf'], f['type'], f['total'], f['fails'], f"{f['rate']}%"))
+                tag = 'oddrow' if r % 2 == 0 else 'evenrow'
+                self.tree_fail.insert("", "end", values=(f['pf'], f['type'], f['total'], f['fails'], f"{f['rate']}%"), tags=(tag,))
+                r += 1
 
     def log(self, message):
         print(message)
