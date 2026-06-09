@@ -137,9 +137,14 @@ class TechRefreshApp:
         for _var, _lbl in ((self.gen_plan, "План ЗНО"),
                            (self.gen_dashboard, "Дашборд"),
                            (self.gen_excess, "Избыток")):
-            ttk.Checkbutton(sel_inner, text=_lbl, variable=_var,
-                            style='Glass.TCheckbutton',
-                            command=self._update_run_button).pack(side='left', padx=(0, 16))
+            _cb = ttk.Checkbutton(sel_inner, text=_lbl, variable=_var,
+                                  onvalue=True, offvalue=False,
+                                  style='Glass.TCheckbutton',
+                                  command=self._update_run_button)
+            # Сбрасываем «alternate» (tristate) — иначе на Windows первый клик
+            # не выставляет переменную в True, и кнопка запуска не появляется.
+            _cb.state(['!alternate'])
+            _cb.pack(side='left', padx=(0, 16))
 
         # === Кнопка запуска (скруглённая, с hover) ===
         # Появляется только после выбора хотя бы одного листа (см. _update_run_button)
